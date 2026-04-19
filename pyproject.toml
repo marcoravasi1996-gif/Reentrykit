@@ -1,0 +1,110 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reentrykit"
+version = "0.0.1"
+description = "Open-source preliminary design tools for hot structures: aerothermal analysis, TPS sizing, thermo-mechanical FEA, and panel flutter for hypersonic and reentry vehicles."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "marcoravasi1996-gif", email = "marco.ravasi1996@gmail.com" },
+]
+keywords = [
+    "hypersonic",
+    "aerothermal",
+    "reentry",
+    "aerospace",
+    "structural-analysis",
+    "thermal-protection",
+    "panel-flutter",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "xarray>=2023.1",
+    "matplotlib>=3.7",
+    "pint>=0.22",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "hypothesis>=6.80",
+    "ruff>=0.1",
+    "mypy>=1.5",
+]
+notebooks = [
+    "jupyter>=1.0",
+    "ipykernel>=6.25",
+    "plotly>=5.17",
+]
+docs = [
+    "mkdocs>=1.5",
+    "mkdocs-material>=9.4",
+    "mkdocstrings[python]>=0.24",
+]
+
+[project.urls]
+Homepage = "https://github.com/marcoravasi1996-gif/reentrykit"
+Repository = "https://github.com/marcoravasi1996-gif/reentrykit"
+Issues = "https://github.com/marcoravasi1996-gif/reentrykit/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "N",   # pep8-naming
+    "SIM", # flake8-simplify
+]
+ignore = ["E501"]  # line too long, handled by formatter
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--tb=short",
+]
