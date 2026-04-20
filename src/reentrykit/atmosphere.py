@@ -1,8 +1,19 @@
-"""US Standard Atmosphere 1976 model.
+"""US Standard Atmosphere 1976 model, 0-86 km regime.
 
-Implements the piecewise atmospheric model defined in NOAA/NASA/USAF (1976),
-*U.S. Standard Atmosphere, 1976*, NASA-TM-X-74335. Valid from 0 to 86 km
-geopotential altitude.
+Implements the piecewise hydrostatic atmospheric model defined in NOAA/NASA/USAF
+(1976), *U.S. Standard Atmosphere, 1976*, NASA-TM-X-74335, covering the well-mixed
+regime from sea level to 86 km geopotential altitude.
+
+The atmosphere is modeled as seven stacked layers, each with a base temperature
+and constant lapse rate. Pressure is integrated hydrostatically from the sea-level
+anchor of 101325 Pa. Density follows from the ideal gas law with constant molar
+mass M = 0.0289644 kg/mol, and speed of sound from the standard perfect-gas
+relation with gamma = 1.4.
+
+Above 86 km the atmosphere enters the diffusive-separation regime with
+altitude-dependent composition and non-analytic temperature profiles. For
+altitudes above 86 km, consider NRLMSISE-00 or the full US1976 upper-atmosphere
+formulation (both outside the scope of this module).
 """
 from __future__ import annotations
 
