@@ -38,16 +38,43 @@ _MIN_ALTITUDE = 0.0  # trajectory terminates at this altitude [m]
 class Vehicle(NamedTuple):
     """Aerodynamic and mass properties of a reentry vehicle.
 
-    Treats the vehicle as a point mass with constant aerodynamic coefficients.
-    Suitable for preliminary-design trajectory analysis.
+    Characterized by ballistic coefficient beta = m / (Cd * S), which is
+    the natural parameterization for trajectory dynamics — only beta (not
+    mass, area, or Cd individually) appears in the ballistic equations of
+    motion. Lift is specified as lift-to-drag ratio (zero for pure
+    ballistic flight).
+
+    Nose radius and mass are carried through for downstream analyses
+    (aerothermal heating, structural loads) but do not affect the
+    translational trajectory.
     """
 
-    mass: float  # [kg]
-    reference_area: float  # [m^2]
-    drag_coefficient: float  # [-]
+    ballistic_coefficient: float  # [kg/m^2], beta = m / (Cd * S)
+    mass: float  # [kg], for structural and thermal analyses
     lift_to_drag_ratio: float = 0.0  # [-], zero for pure ballistic
-    nose_radius: float = 0.1  # [m], used for downstream heating analysis
+    nose_radius: float = 0.1  # [m], for stagnation-point heating
 
+    @classmethod
+    def from_mass_area_cd(
+        cls,
+        mass: float,
+        reference_area: float,
+        drag_coefficient: float,
+        lift_to_drag_ratio: float = 0.0,
+        nose_radius: float = 0.1,
+    ) -> "Vehicle":
+        """Construct a Vehicle from individual m, S, Cd values.
+
+        Useful when specifying vehicles with traditional aerodynamic
+        parameters rather than a directly-known ballistic coefficient.
+        """
+        beta = mass / (drag_coefficient * reference_area)
+        return cls(
+            ballistic_coefficient=beta,
+            mass=mass,
+            lift_to_drag_ratio=lift_to_drag_ratio,
+            nose_radius=nose_radius,
+        )
 
 class InitialState(NamedTuple):
     """Initial state of the vehicle at the start of integration."""
@@ -92,15 +119,16 @@ def _derivatives(
     velocity, flight_path_angle, altitude, _downrange = state
 
     # Atmospheric properties at current altitude
+# Atmospheric properties at current altitude
+# Atmospheric properties at current altitude
     atmo = us1976(altitude)
     density = atmo.density
 
-    # Dynamic pressure
-    q_dyn = 0.5 * density * velocity**2
-
-    # Aerodynamic forces
-    drag = q_dyn * vehicle.reference_area * vehicle.drag_coefficient
-    lift = drag * vehicle.lift_to_drag_ratio
+    # Drag and lift accelerations expressed via ballistic coefficient.
+    # a_drag = (1/2) * rho * V^2 / beta   [m/s^2]
+    # a_lift = a_drag * (L/D)
+    drag_accel = 0.5 * density * velocity**2 / vehicle.ballistic_coefficient
+    lift_accel = drag_accel * vehicle.lift_to_drag_ratio
 
     # Gravity and the effective radial acceleration
     r = EARTH_RADIUS + altitude
@@ -108,8 +136,8 @@ def _derivatives(
     cos_gamma = np.cos(flight_path_angle)
 
     # Equations of motion
-    dV_dt = -drag / vehicle.mass - G0 * sin_gamma
-    dgamma_dt = lift / (vehicle.mass * velocity) - (G0 / velocity - velocity / r) * cos_gamma
+    dV_dt = -drag_accel - G0 * sin_gamma
+    dgamma_dt = lift_accel / velocity - (G0 / velocity - velocity / r) * cos_gamma
     dh_dt = velocity * sin_gamma
     ds_dt = EARTH_RADIUS * velocity * cos_gamma / r
 

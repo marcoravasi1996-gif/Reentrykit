@@ -17,10 +17,12 @@ from reentrykit.trajectory import (
     Vehicle,
     simulate,
 )
+
+
 @pytest.fixture
 def reference_vehicle() -> Vehicle:
     """A generic biconic reentry body used across multiple tests."""
-    return Vehicle(
+    return Vehicle.from_mass_area_cd(
         mass=500.0,
         reference_area=0.8,
         drag_coefficient=1.5,
@@ -38,6 +40,8 @@ def nominal_entry_state() -> InitialState:
         flight_path_angle=np.deg2rad(-5.0),
         downrange=0.0,
     )
+
+
 # ---------------------------------------------------------------------------
 # API and sanity tests
 # ---------------------------------------------------------------------------
@@ -46,7 +50,7 @@ def nominal_entry_state() -> InitialState:
 def test_rejects_altitude_above_atmosphere(reference_vehicle):
     """Initial altitude above the atmosphere's valid range is rejected."""
     bad_state = InitialState(
-        altitude=200_000.0,  # 200 km — well above the 86 km ceiling
+        altitude=200_000.0,
         velocity=7500.0,
         flight_path_angle=np.deg2rad(-5.0),
     )
@@ -94,7 +98,7 @@ def test_ground_impact_termination(reference_vehicle, nominal_entry_state):
     result = simulate(reference_vehicle, nominal_entry_state)
 
     assert result.termination_reason == "Ground impact"
-    assert result.altitude[-1] < 200.0  # final sample near ground
+    assert result.altitude[-1] < 200.0
 
 
 def test_altitude_monotonically_decreases(reference_vehicle, nominal_entry_state):
@@ -102,7 +106,6 @@ def test_altitude_monotonically_decreases(reference_vehicle, nominal_entry_state
     result = simulate(reference_vehicle, nominal_entry_state)
 
     altitude_deltas = np.diff(result.altitude)
-    # Allow a tiny positive tolerance for numerical noise near very shallow segments
     assert (altitude_deltas <= 1.0).all(), "Altitude should never increase during ballistic reentry"
 
 
@@ -110,9 +113,10 @@ def test_velocity_decreases_from_start(reference_vehicle, nominal_entry_state):
     """Velocity at impact is far below orbital entry velocity."""
     result = simulate(reference_vehicle, nominal_entry_state)
 
-    assert result.velocity[-1] < result.velocity[0] / 2  # lost at least half the speed
-    assert result.velocity[-1] > 0  # still moving
-    assert result.velocity[-1] < 1000  # subsonic by the time it reaches the ground
+    assert result.velocity[-1] < result.velocity[0] / 2
+    assert result.velocity[-1] > 0
+    assert result.velocity[-1] < 1000
+
 
 # ---------------------------------------------------------------------------
 # Physical invariant tests
@@ -120,28 +124,28 @@ def test_velocity_decreases_from_start(reference_vehicle, nominal_entry_state):
 
 
 def test_vacuum_ballistic_return_velocity():
-    """A zero-drag vehicle launched vertically returns at its launch speed.
+    """A drag-free vehicle launched vertically returns at its launch speed.
 
     In vacuum with constant gravity, a ballistic object launched straight up
     reaches apogee and falls back to its launch altitude at the same speed
-    (energy conservation). We approximate vacuum by setting drag coefficient
-    to zero; atmospheric drag above 80 km is tiny anyway.
+    (energy conservation). We approximate vacuum by setting the ballistic
+    coefficient to an enormous value; atmospheric drag above 80 km is tiny
+    anyway.
     """
     vehicle = Vehicle(
+        ballistic_coefficient=1e12,  # effectively drag-free
         mass=500.0,
-        reference_area=0.8,
-        drag_coefficient=0.0,  # no drag -> ballistic in vacuum
+        lift_to_drag_ratio=0.0,
+        nose_radius=0.1,
     )
     initial_state = InitialState(
         altitude=80000.0,
-        velocity=100.0,  # slow so it stays near the launch altitude
-        flight_path_angle=np.deg2rad(90.0),  # straight up
+        velocity=100.0,
+        flight_path_angle=np.deg2rad(90.0),
     )
 
     result = simulate(vehicle, initial_state, max_time=30.0, dt_output=0.1)
 
-    # At t = 2 * V_0 / g0 (ballistic return time), altitude matches launch
-    # altitude and velocity magnitude equals initial velocity.
     t_return = 2.0 * 100.0 / 9.80665
     i_return = np.argmin(np.abs(result.time - t_return))
 
@@ -150,12 +154,8 @@ def test_vacuum_ballistic_return_velocity():
 
 
 def test_deeper_entry_angle_causes_higher_peak_q(nominal_entry_state):
-    """Steeper entry angles produce higher peak dynamic pressure.
-
-    Physical invariant: a steeper entry deposits the vehicle deeper into
-    denser atmosphere at higher velocity, producing a larger peak q.
-    """
-    vehicle = Vehicle(mass=500.0, reference_area=0.8, drag_coefficient=1.5)
+    """Steeper entry angles produce higher peak dynamic pressure."""
+    vehicle = Vehicle.from_mass_area_cd(mass=500.0, reference_area=0.8, drag_coefficient=1.5)
 
     shallow_state = InitialState(
         altitude=80000.0, velocity=7500.0, flight_path_angle=np.deg2rad(-3.0)
@@ -171,13 +171,9 @@ def test_deeper_entry_angle_causes_higher_peak_q(nominal_entry_state):
 
 
 def test_higher_ballistic_coefficient_penetrates_deeper(nominal_entry_state):
-    """A heavier vehicle (higher ballistic coefficient) decelerates lower.
-
-    Ballistic coefficient beta = m / (Cd * S). Higher beta -> harder to
-    decelerate -> reaches peak q at lower altitude.
-    """
-    light_vehicle = Vehicle(mass=200.0, reference_area=0.8, drag_coefficient=1.5)
-    heavy_vehicle = Vehicle(mass=1000.0, reference_area=0.8, drag_coefficient=1.5)
+    """A higher ballistic coefficient decelerates lower in the atmosphere."""
+    light_vehicle = Vehicle.from_mass_area_cd(mass=200.0, reference_area=0.8, drag_coefficient=1.5)
+    heavy_vehicle = Vehicle.from_mass_area_cd(mass=1000.0, reference_area=0.8, drag_coefficient=1.5)
 
     light_result = simulate(light_vehicle, nominal_entry_state)
     heavy_result = simulate(heavy_vehicle, nominal_entry_state)
@@ -190,7 +186,7 @@ def test_higher_ballistic_coefficient_penetrates_deeper(nominal_entry_state):
 
 def test_dynamic_pressure_consistent_with_state():
     """Dynamic pressure at every step equals 0.5 * rho * V^2."""
-    vehicle = Vehicle(mass=500.0, reference_area=0.8, drag_coefficient=1.5)
+    vehicle = Vehicle.from_mass_area_cd(mass=500.0, reference_area=0.8, drag_coefficient=1.5)
     initial_state = InitialState(
         altitude=80000.0, velocity=7500.0, flight_path_angle=np.deg2rad(-5.0)
     )
@@ -205,7 +201,7 @@ def test_mach_consistent_with_state():
     """Mach number at every step equals V / a(h)."""
     from reentrykit.atmosphere import us1976
 
-    vehicle = Vehicle(mass=500.0, reference_area=0.8, drag_coefficient=1.5)
+    vehicle = Vehicle.from_mass_area_cd(mass=500.0, reference_area=0.8, drag_coefficient=1.5)
     initial_state = InitialState(
         altitude=80000.0, velocity=7500.0, flight_path_angle=np.deg2rad(-5.0)
     )
@@ -217,6 +213,7 @@ def test_mach_consistent_with_state():
     ])
     np.testing.assert_allclose(result.mach, expected_mach, rtol=1e-10)
 
+
 # ---------------------------------------------------------------------------
 # Allen-Eggers classical validation
 # ---------------------------------------------------------------------------
@@ -224,10 +221,8 @@ def test_mach_consistent_with_state():
 
 def _peak_deceleration(result: TrajectoryResult) -> float:
     """Peak deceleration magnitude [m/s^2] along the trajectory."""
-    # Deceleration = -dV/dt. Using central differences for interior, forward
-    # at the start, backward at the end.
     dV_dt = np.gradient(result.velocity, result.time)
-    return float(-dV_dt.min())  # most negative dV/dt = peak deceleration
+    return float(-dV_dt.min())
 
 
 def _allen_eggers_peak_deceleration(
@@ -235,24 +230,15 @@ def _allen_eggers_peak_deceleration(
     entry_flight_path_angle: float,
     scale_height: float = 7000.0,
 ) -> float:
-    """Allen-Eggers (1958) peak deceleration for ballistic reentry.
-
-    Closed-form prediction from NACA Report 1381. Assumes exponential
-    atmosphere, shallow entry angle, non-lifting vehicle, constant Cd.
-    """
+    """Allen-Eggers (1958) peak deceleration for ballistic reentry."""
     return entry_velocity**2 * abs(np.sin(entry_flight_path_angle)) / (
         2 * np.e * scale_height
     )
 
 
 def test_allen_eggers_peak_deceleration_magnitude():
-    """Peak deceleration matches Allen-Eggers (1958) prediction within 20%.
-
-    US1976 is piecewise, not purely exponential, so we allow a loose
-    tolerance. The 7 km scale height is representative of the lower
-    atmosphere where peak deceleration occurs.
-    """
-    vehicle = Vehicle(mass=500.0, reference_area=0.8, drag_coefficient=1.5)
+    """Peak deceleration matches Allen-Eggers (1958) prediction within 20%."""
+    vehicle = Vehicle.from_mass_area_cd(mass=500.0, reference_area=0.8, drag_coefficient=1.5)
     initial_state = InitialState(
         altitude=80000.0,
         velocity=7500.0,
@@ -276,12 +262,7 @@ def test_allen_eggers_peak_deceleration_magnitude():
 
 
 def test_allen_eggers_invariance_to_vehicle_properties():
-    """Peak deceleration is nearly independent of mass, area, and drag coefficient.
-
-    Allen-Eggers' central insight: for ballistic entry, peak deceleration
-    depends only on entry velocity and angle, not on vehicle ballistic
-    properties. These merely shift the altitude at which the peak occurs.
-    """
+    """Peak deceleration is nearly independent of mass, area, and drag coefficient."""
     initial_state = InitialState(
         altitude=80000.0,
         velocity=7500.0,
@@ -289,16 +270,15 @@ def test_allen_eggers_invariance_to_vehicle_properties():
     )
 
     vehicles = [
-        Vehicle(mass=200.0, reference_area=0.5, drag_coefficient=1.2),
-        Vehicle(mass=500.0, reference_area=0.8, drag_coefficient=1.5),
-        Vehicle(mass=1500.0, reference_area=1.5, drag_coefficient=1.8),
+        Vehicle.from_mass_area_cd(mass=200.0, reference_area=0.5, drag_coefficient=1.2),
+        Vehicle.from_mass_area_cd(mass=500.0, reference_area=0.8, drag_coefficient=1.5),
+        Vehicle.from_mass_area_cd(mass=1500.0, reference_area=1.5, drag_coefficient=1.8),
     ]
 
     peak_decelerations = [
         _peak_deceleration(simulate(v, initial_state)) for v in vehicles
     ]
 
-    # All three should be within 10% of each other
     max_peak = max(peak_decelerations)
     min_peak = min(peak_decelerations)
     spread = (max_peak - min_peak) / np.mean(peak_decelerations)
