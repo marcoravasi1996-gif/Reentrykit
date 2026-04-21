@@ -48,9 +48,9 @@ def nominal_entry_state() -> InitialState:
 
 
 def test_rejects_altitude_above_atmosphere(reference_vehicle):
-    """Initial altitude above the atmosphere's valid range is rejected."""
+    """Initial altitude above the extended atmosphere range is rejected."""
     bad_state = InitialState(
-        altitude=200_000.0,
+        altitude=300_000.0,  # above the 200 km extended ceiling
         velocity=7500.0,
         flight_path_angle=np.deg2rad(-5.0),
     )
@@ -346,17 +346,43 @@ def test_negative_lift_modulation_prevents_skipout():
     """A brief negative L/D pulse early in the trajectory prevents skip-out
     that would otherwise occur with constant positive L/D (Apollo-style
     guidance)."""
-    # Apollo-like entry conditions
+    # Apollo-like entry conditions, but starting below the ceiling so that
+    # the constant +0.5 L/D case doesn't immediately skip to 200 km.
     entry_state = InitialState(
         altitude=85_000.0,
         velocity=11_137.0,
         flight_path_angle=np.deg2rad(-6.93),
     )
 
-    # Constant high L/D: causes significant skip
+    # Constant high L/D: causes skip
     vehicle_skip = Vehicle.from_mass_area_cd(
         mass=5357.0, reference_area=12.0, drag_coefficient=1.2,
         lift_to_drag_ratio=0.5,
+    )
+
+    # Time-varying: brief negative pulse at start prevents skip
+    def apollo_like_schedule(t: float) -> float:
+        if t < 22.0:
+            return -0.5  # down-control to prevent skip
+        return 0.3  # gentle positive afterwards
+
+    vehicle_guided = Vehicle.from_mass_area_cd(
+        mass=5357.0, reference_area=12.0, drag_coefficient=1.2,
+        lift_to_drag_ratio=apollo_like_schedule,
+    )
+
+    result_skip = simulate(vehicle_skip, entry_state, max_time=3000.0)
+    result_guided = simulate(vehicle_guided, entry_state, max_time=3000.0)
+
+    # The skip trajectory should either terminate by skipping out or reach
+    # a much higher max altitude than the guided one.
+    max_alt_skip = result_skip.altitude.max()
+    max_alt_guided = result_guided.altitude.max()
+
+    assert max_alt_skip > max_alt_guided + 10_000.0, (
+        f"Constant +0.5 L/D reached {max_alt_skip/1000:.1f} km, "
+        f"guided reached {max_alt_guided/1000:.1f} km. "
+        f"Expected >10 km higher apogee without negative-lift modulation."
     )
 
     # Time-varying: brief negative pulse at start prevents skip
@@ -385,3 +411,4 @@ def test_negative_lift_modulation_prevents_skipout():
         f"constant L/D reached {max_alt_skip/1000:.1f} km. "
         f"Negative lift pulse should suppress skip-out."
     )
+    

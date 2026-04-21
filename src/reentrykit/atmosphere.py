@@ -11,9 +11,18 @@ mass M = 0.0289644 kg/mol, and speed of sound from the standard perfect-gas
 relation with gamma = 1.4.
 
 Above 86 km the atmosphere enters the diffusive-separation regime with
-altitude-dependent composition and non-analytic temperature profiles. For
-altitudes above 86 km, consider NRLMSISE-00 or the full US1976 upper-atmosphere
+altitude-dependent composition and non-analytic temperature profiles.
+Faithful modeling requires NRLMSISE-00 or the full US1976 upper-atmosphere
 formulation (both outside the scope of this module).
+
+For convenience in reentry trajectory analysis — where vehicles may enter
+above 86 km but only briefly pass through near-vacuum before reaching the
+validated regime — this module provides a simple exponential extension
+from 86 km to 200 km. The extension uses a fixed scale height (7 km)
+anchored at the US1976 density at 86 km, continuous in value but not in
+derivative. Temperature and speed of sound in the extension are held at
+their 86 km values. This is a calibrated approximation for preliminary
+design, not a rigorous atmospheric model.
 """
 from __future__ import annotations
 
@@ -40,7 +49,18 @@ _LAYER_LAPSE_RATES = np.array([-0.0065, 0.0, 0.001, 0.0028, 0.0, -0.0028, -0.002
 _P0 = 101325.0
 
 # Upper bound of validity for this implementation [m]
+# Upper bound of the US1976 validated regime [m]
 MAX_ALTITUDE = 86000.0
+
+# Upper bound of the exponential extension [m]. Above this, callers must
+# model the atmosphere themselves or use a higher-fidelity model.
+MAX_EXTENDED_ALTITUDE = 200000.0
+
+# Scale height used for the 86-200 km exponential extension [m].
+# Chosen as a round value close to Tetzman (2010, M.S. Thesis, University
+# of Minnesota) H = 6.93 km, which itself is an altitude-averaged value
+# calibrated for Apollo-class reentry trajectories.
+_UPPER_SCALE_HEIGHT = 7000.0
 
 def _compute_base_pressures() -> np.ndarray:
     """Compute pressure at each layer base by integrating upward from sea level."""
@@ -76,39 +96,12 @@ class AtmosphereState(NamedTuple):
     density: float  # [kg/m^3]
     speed_of_sound: float  # [m/s]
 
-def us1976(altitude: float) -> AtmosphereState:
-    """Compute atmospheric properties at a given geopotential altitude.
+def _us1976_below_ceiling(altitude: float) -> AtmosphereState:
+    """Compute atmospheric properties strictly within the 0-86 km validated range.
 
-    Parameters
-    ----------
-    altitude : float
-        Geopotential altitude above mean sea level [m]. Must be in the range
-        [0, 86000].
-
-    Returns
-    -------
-    AtmosphereState
-        Temperature [K], pressure [Pa], density [kg/m^3], and speed of
-        sound [m/s] at the requested altitude.
-
-    Raises
-    ------
-    ValueError
-        If altitude is outside the valid range [0, 86000] m.
-
-    References
-    ----------
-    NOAA/NASA/USAF (1976). *U.S. Standard Atmosphere, 1976*.
-    NASA-TM-X-74335.
+    Internal helper used to both serve requests below the ceiling and to anchor
+    the exponential extension above it.
     """
-# Tolerate tiny numerical overshoots from ODE integrators.
-    _TOL = 100.0
-    if altitude < -_TOL or altitude > MAX_ALTITUDE + _TOL:
-        raise ValueError(
-            f"Altitude {altitude} m is outside the valid range [0, {MAX_ALTITUDE}] m."
-        )
-    altitude = float(np.clip(altitude, 0.0, MAX_ALTITUDE))
-
     # Find which layer the altitude falls in
     layer_index = int(np.searchsorted(_LAYER_BASE_ALTITUDES, altitude, side="right") - 1)
 
@@ -138,4 +131,70 @@ def us1976(altitude: float) -> AtmosphereState:
         pressure=float(pressure),
         density=float(density),
         speed_of_sound=float(speed_of_sound),
+    )
+
+
+# State at the ceiling, pre-computed once at import time. Used as the anchor
+# for the 86-200 km exponential extension.
+_STATE_AT_CEILING = _us1976_below_ceiling(MAX_ALTITUDE)
+
+
+def us1976(altitude: float) -> AtmosphereState:
+    """Compute atmospheric properties at a given geopotential altitude.
+
+    Below 86 km, returns US1976-standard values (temperature, pressure,
+    density, speed of sound) from the layered hydrostatic model.
+
+    Between 86 km and 200 km, returns an exponential extension anchored at
+    the 86 km US1976 state: density decays as exp(-(h - 86 km) / H) with
+    H = 7 km, pressure decays in the same ratio, while temperature and
+    speed of sound are held at their 86 km values. This is a calibrated
+    approximation for preliminary-design use only — see module docstring.
+
+    Parameters
+    ----------
+    altitude : float
+        Geopotential altitude above mean sea level [m]. Must be in the range
+        [0, 200000].
+
+    Returns
+    -------
+    AtmosphereState
+        Temperature [K], pressure [Pa], density [kg/m^3], and speed of
+        sound [m/s] at the requested altitude.
+
+    Raises
+    ------
+    ValueError
+        If altitude is outside the valid range [0, 200000] m.
+
+    References
+    ----------
+    NOAA/NASA/USAF (1976). *U.S. Standard Atmosphere, 1976*.
+    NASA-TM-X-74335.
+    """
+    # Tolerate tiny numerical overshoots from ODE integrators.
+    _TOL = 100.0
+    if altitude < -_TOL or altitude > MAX_EXTENDED_ALTITUDE + _TOL:
+        raise ValueError(
+            f"Altitude {altitude} m is outside the valid range "
+            f"[0, {MAX_EXTENDED_ALTITUDE}] m."
+        )
+    altitude = float(np.clip(altitude, 0.0, MAX_EXTENDED_ALTITUDE))
+
+    if altitude <= MAX_ALTITUDE:
+        return _us1976_below_ceiling(altitude)
+
+    # Exponential extension above 86 km, continuous in density/pressure with
+    # US1976 at the ceiling. Temperature and speed of sound are frozen at the
+    # ceiling value — an approximation that is acceptable because this regime
+    # is near-vacuum for trajectory purposes.
+    decay = np.exp(-(altitude - MAX_ALTITUDE) / _UPPER_SCALE_HEIGHT)
+    density = _STATE_AT_CEILING.density * decay
+    pressure = _STATE_AT_CEILING.pressure * decay
+    return AtmosphereState(
+        temperature=_STATE_AT_CEILING.temperature,
+        pressure=float(pressure),
+        density=float(density),
+        speed_of_sound=_STATE_AT_CEILING.speed_of_sound,
     )

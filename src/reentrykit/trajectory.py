@@ -28,7 +28,7 @@ LiftToDragSpec = Union[float, Callable[[float], float]]
 import numpy as np
 from scipy.integrate import solve_ivp
 
-from reentrykit.atmosphere import MAX_ALTITUDE, us1976
+from reentrykit.atmosphere import MAX_ALTITUDE, MAX_EXTENDED_ALTITUDE, us1976
 
 # Physical constants for trajectory dynamics
 G0 = 9.80665  # standard gravitational acceleration [m/s^2]
@@ -129,17 +129,9 @@ def _derivatives(
     """
     velocity, flight_path_angle, altitude, _downrange = state
 
-    # Atmospheric properties at current altitude. Above the US1976 ceiling
-    # (86 km), we treat the atmosphere as vacuum (zero density). This is
-    # physically reasonable: density at 86 km is already ~6e-6 kg/m^3, and
-    # drag becomes negligible above this altitude. This allows trajectories
-    # with sufficient lift to skip back above 86 km without the atmosphere
-    # module raising errors.
-    if altitude >= MAX_ALTITUDE:
-        density = 0.0
-    else:
-        atmo = us1976(altitude)
-        density = atmo.density
+    # Atmospheric properties at current altitude. us1976() now handles the
+    # full 0-200 km range, with an exponential extension above 86 km.
+    density = us1976(altitude).density
 
     # Drag and lift accelerations expressed via ballistic coefficient.
     # a_drag = (1/2) * rho * V^2 / beta   [m/s^2]
@@ -195,10 +187,10 @@ def simulate(
         If the initial altitude is outside the valid atmosphere range
         [0, 86000] m.
     """
-    if initial_state.altitude < 0.0 or initial_state.altitude > MAX_ALTITUDE:
+    if initial_state.altitude < 0.0 or initial_state.altitude > MAX_EXTENDED_ALTITUDE:
         raise ValueError(
             f"Initial altitude {initial_state.altitude} m is outside the "
-            f"valid atmosphere range [0, {MAX_ALTITUDE}] m."
+            f"valid atmosphere range [0, {MAX_EXTENDED_ALTITUDE}] m."
         )
 
     # Pack the initial state into the form solve_ivp expects
@@ -210,11 +202,22 @@ def simulate(
     ])
 
     # Event: stop integration when altitude reaches zero
+    # Event: stop integration when altitude reaches zero
     def ground_impact(time: float, state: np.ndarray, vehicle: Vehicle) -> float:
         return state[2] - _MIN_ALTITUDE  # altitude component
 
     ground_impact.terminal = True
     ground_impact.direction = -1  # only trigger on descending crossing
+
+    # Event: stop integration if the vehicle skips above the atmosphere ceiling.
+    # This prevents the integrator from probing altitudes beyond the model's
+    # valid range, and correctly terminates trajectories that skip out
+    # permanently (e.g. excessive lift modulation without guidance).
+    def skip_out(time: float, state: np.ndarray, vehicle: Vehicle) -> float:
+        return MAX_EXTENDED_ALTITUDE - state[2]
+
+    skip_out.terminal = True
+    skip_out.direction = -1  # only trigger on ascending crossing
 
     # Evenly-spaced output times
     t_eval = np.arange(0.0, max_time + dt_output, dt_output)
@@ -226,7 +229,7 @@ def simulate(
             y0=y0,
             args=(vehicle,),
             method="RK45",
-            events=ground_impact,
+            events=(ground_impact, skip_out),
             t_eval=t_eval,
             rtol=1e-8,
             atol=1e-10,
@@ -240,25 +243,18 @@ def simulate(
     altitude = solution.y[2]
     downrange = solution.y[3]
 
-    # Derived quantities at each time step. Above the atmosphere ceiling
-    # we report zero density and zero Mach (speed of sound is undefined
-    # in vacuum), which matches the vacuum-coast behavior used during
-    # integration.
-    densities = np.array([
-        us1976(h).density if h < MAX_ALTITUDE else 0.0
-        for h in altitude
-    ])
-    speeds_of_sound = np.array([
-        us1976(h).speed_of_sound if h < MAX_ALTITUDE else np.nan
-        for h in altitude
-    ])
-    with np.errstate(invalid="ignore"):
-        mach = np.where(np.isnan(speeds_of_sound), 0.0, velocity / speeds_of_sound)
+    # Derived quantities at each time step. us1976() handles the full
+    # 0-200 km range via an exponential extension above the validated 86 km ceiling.
+    densities = np.array([us1976(h).density for h in altitude])
+    speeds_of_sound = np.array([us1976(h).speed_of_sound for h in altitude])
+    mach = velocity / speeds_of_sound
     dynamic_pressure = 0.5 * densities * velocity**2
 
     # Determine why integration stopped
     if solution.t_events[0].size > 0:
         termination_reason = "Ground impact"
+    elif solution.t_events[1].size > 0:
+        termination_reason = "Skip-out above extended atmosphere ceiling"
     elif solution.t[-1] >= max_time - 1e-6:
         termination_reason = "Max time reached"
     else:

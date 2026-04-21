@@ -7,7 +7,7 @@ seven atmospheric layers.
 """
 
 from __future__ import annotations
-
+import numpy as np
 import pytest
 
 from reentrykit.atmosphere import AtmosphereState, MAX_ALTITUDE, us1976
@@ -57,3 +57,57 @@ def test_matches_reference_table(
     assert state.temperature == pytest.approx(temperature, rel=RTOL)
     assert state.pressure == pytest.approx(pressure, rel=RTOL)
     assert state.density == pytest.approx(density, rel=RTOL)
+# ---------------------------------------------------------------------------
+# Exponential extension above 86 km
+# ---------------------------------------------------------------------------
+
+
+def test_extension_continuous_at_ceiling():
+    """Density and pressure are continuous at the 86 km transition."""
+    state_below = us1976(MAX_ALTITUDE - 1.0)
+    state_above = us1976(MAX_ALTITUDE + 1.0)
+
+    np.testing.assert_allclose(state_above.density, state_below.density, rtol=1e-3)
+    np.testing.assert_allclose(state_above.pressure, state_below.pressure, rtol=1e-3)
+
+
+def test_extension_density_decays_exponentially():
+    """Density in the extension region follows exp(-h/H) with H = 7 km."""
+    rho_86 = us1976(MAX_ALTITUDE).density
+    rho_93 = us1976(MAX_ALTITUDE + 7000.0).density
+
+    ratio = rho_86 / rho_93
+    assert abs(ratio - np.e) / np.e < 0.01, (
+        f"Density drop over one scale height: {ratio:.3f}, expected {np.e:.3f}"
+    )
+
+
+def test_extension_temperature_frozen():
+    """Temperature is held at the 86 km value throughout the extension."""
+    t_86 = us1976(MAX_ALTITUDE).temperature
+    assert us1976(100_000.0).temperature == t_86
+    assert us1976(150_000.0).temperature == t_86
+    assert us1976(200_000.0).temperature == t_86
+
+
+def test_extension_valid_at_200km_upper_bound():
+    """us1976 accepts altitudes up to the extended ceiling."""
+    state = us1976(200_000.0)
+    assert state.density > 0.0
+    assert state.pressure > 0.0
+
+
+def test_extension_rejects_above_extended_ceiling():
+    """us1976 rejects altitudes above 200 km."""
+    with pytest.raises(ValueError, match="outside the valid range"):
+        us1976(300_000.0)
+
+
+def test_extension_density_much_lower_than_at_ceiling():
+    """At 200 km, density is dramatically lower than at 86 km (vacuum regime)."""
+    rho_86 = us1976(MAX_ALTITUDE).density
+    rho_200 = us1976(200_000.0).density
+
+    ratio = rho_200 / rho_86
+    assert ratio < 1e-6, f"Density ratio 200km/86km = {ratio:.2e}, expected <1e-6"
+    assert ratio > 0.0, "Density must remain strictly positive"
