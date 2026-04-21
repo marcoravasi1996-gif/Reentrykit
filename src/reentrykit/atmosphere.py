@@ -101,10 +101,13 @@ def us1976(altitude: float) -> AtmosphereState:
     NOAA/NASA/USAF (1976). *U.S. Standard Atmosphere, 1976*.
     NASA-TM-X-74335.
     """
-    if altitude < 0.0 or altitude > MAX_ALTITUDE:
+# Tolerate tiny numerical overshoots from ODE integrators.
+    _TOL = 100.0
+    if altitude < -_TOL or altitude > MAX_ALTITUDE + _TOL:
         raise ValueError(
             f"Altitude {altitude} m is outside the valid range [0, {MAX_ALTITUDE}] m."
         )
+    altitude = float(np.clip(altitude, 0.0, MAX_ALTITUDE))
 
     # Find which layer the altitude falls in
     layer_index = int(np.searchsorted(_LAYER_BASE_ALTITUDES, altitude, side="right") - 1)
