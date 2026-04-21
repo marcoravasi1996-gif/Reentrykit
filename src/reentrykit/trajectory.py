@@ -174,15 +174,16 @@ def simulate(
 
     # Integrate
     solution = solve_ivp(
-        fun=_derivatives,
-        t_span=(0.0, max_time),
-        y0=y0,
-        args=(vehicle,),
-        method="RK45",
-        events=ground_impact,
-        t_eval=t_eval,
-        rtol=1e-8,
-        atol=1e-10,
+            fun=_derivatives,
+            t_span=(0.0, max_time),
+            y0=y0,
+            args=(vehicle,),
+            method="RK45",
+            events=ground_impact,
+            t_eval=t_eval,
+            rtol=1e-8,
+            atol=1e-10,
+            max_step=0.1,
     )
 
     # Extract time histories
