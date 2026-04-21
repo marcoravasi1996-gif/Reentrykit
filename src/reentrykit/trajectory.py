@@ -20,7 +20,10 @@ Planetary Entry Flight Mechanics*. University of Michigan Press.
 """
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Callable, NamedTuple, Union
+
+# Type alias: L/D can be a constant float or a function of time [seconds]
+LiftToDragSpec = Union[float, Callable[[float], float]]
 
 import numpy as np
 from scipy.integrate import solve_ivp
@@ -41,8 +44,15 @@ class Vehicle(NamedTuple):
     Characterized by ballistic coefficient beta = m / (Cd * S), which is
     the natural parameterization for trajectory dynamics — only beta (not
     mass, area, or Cd individually) appears in the ballistic equations of
-    motion. Lift is specified as lift-to-drag ratio (zero for pure
-    ballistic flight).
+    motion.
+
+    Lift is specified as lift-to-drag ratio, which can be either:
+    - A constant float (for constant-L/D flight, including pure ballistic
+      when L/D = 0)
+    - A callable taking time [s] and returning L/D, for time-varying
+      trajectories such as Apollo's guided skip-glide. This enables
+      replicating published control-input schedules like those in
+      Tetzman (2010) Chapter 3.
 
     Nose radius and mass are carried through for downstream analyses
     (aerothermal heating, structural loads) but do not affect the
@@ -51,7 +61,7 @@ class Vehicle(NamedTuple):
 
     ballistic_coefficient: float  # [kg/m^2], beta = m / (Cd * S)
     mass: float  # [kg], for structural and thermal analyses
-    lift_to_drag_ratio: float = 0.0  # [-], zero for pure ballistic
+    lift_to_drag_ratio: LiftToDragSpec = 0.0  # [-] or callable(t_sec) -> L/D
     nose_radius: float = 0.1  # [m], for stagnation-point heating
 
     @classmethod
@@ -60,13 +70,14 @@ class Vehicle(NamedTuple):
         mass: float,
         reference_area: float,
         drag_coefficient: float,
-        lift_to_drag_ratio: float = 0.0,
+        lift_to_drag_ratio: LiftToDragSpec = 0.0,
         nose_radius: float = 0.1,
     ) -> "Vehicle":
         """Construct a Vehicle from individual m, S, Cd values.
 
         Useful when specifying vehicles with traditional aerodynamic
         parameters rather than a directly-known ballistic coefficient.
+        The lift_to_drag_ratio may be a constant or a callable of time [s].
         """
         beta = mass / (drag_coefficient * reference_area)
         return cls(
@@ -118,18 +129,26 @@ def _derivatives(
     """
     velocity, flight_path_angle, altitude, _downrange = state
 
-    # Atmospheric properties at current altitude
-# Atmospheric properties at current altitude
-# Atmospheric properties at current altitude
-    atmo = us1976(altitude)
-    density = atmo.density
+    # Atmospheric properties at current altitude. Above the US1976 ceiling
+    # (86 km), we treat the atmosphere as vacuum (zero density). This is
+    # physically reasonable: density at 86 km is already ~6e-6 kg/m^3, and
+    # drag becomes negligible above this altitude. This allows trajectories
+    # with sufficient lift to skip back above 86 km without the atmosphere
+    # module raising errors.
+    if altitude >= MAX_ALTITUDE:
+        density = 0.0
+    else:
+        atmo = us1976(altitude)
+        density = atmo.density
 
     # Drag and lift accelerations expressed via ballistic coefficient.
     # a_drag = (1/2) * rho * V^2 / beta   [m/s^2]
     # a_lift = a_drag * (L/D)
     drag_accel = 0.5 * density * velocity**2 / vehicle.ballistic_coefficient
-    lift_accel = drag_accel * vehicle.lift_to_drag_ratio
-
+    # Evaluate L/D: constant float or callable(t_sec) -> L/D
+    ld = vehicle.lift_to_drag_ratio
+    ld_value = ld(time) if callable(ld) else ld
+    lift_accel = drag_accel * ld_value
     # Gravity and the effective radial acceleration
     r = EARTH_RADIUS + altitude
     sin_gamma = np.sin(flight_path_angle)
@@ -221,10 +240,20 @@ def simulate(
     altitude = solution.y[2]
     downrange = solution.y[3]
 
-    # Derived quantities at each time step
-    densities = np.array([us1976(h).density for h in altitude])
-    speeds_of_sound = np.array([us1976(h).speed_of_sound for h in altitude])
-    mach = velocity / speeds_of_sound
+    # Derived quantities at each time step. Above the atmosphere ceiling
+    # we report zero density and zero Mach (speed of sound is undefined
+    # in vacuum), which matches the vacuum-coast behavior used during
+    # integration.
+    densities = np.array([
+        us1976(h).density if h < MAX_ALTITUDE else 0.0
+        for h in altitude
+    ])
+    speeds_of_sound = np.array([
+        us1976(h).speed_of_sound if h < MAX_ALTITUDE else np.nan
+        for h in altitude
+    ])
+    with np.errstate(invalid="ignore"):
+        mach = np.where(np.isnan(speeds_of_sound), 0.0, velocity / speeds_of_sound)
     dynamic_pressure = 0.5 * densities * velocity**2
 
     # Determine why integration stopped

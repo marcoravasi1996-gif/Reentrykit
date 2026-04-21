@@ -287,3 +287,101 @@ def test_allen_eggers_invariance_to_vehicle_properties():
         f"Peak deceleration varies by {spread * 100:.1f}% across vehicles, "
         f"violating Allen-Eggers invariance. Values: {peak_decelerations}"
     )
+# ---------------------------------------------------------------------------
+# Time-varying lift-to-drag ratio
+# ---------------------------------------------------------------------------
+
+
+def test_constant_lift_schedule_matches_float_ratio(nominal_entry_state):
+    """Passing lift_to_drag_ratio=0.3 as a constant and as `lambda t: 0.3`
+    produces identical trajectories."""
+    vehicle_float = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.5, lift_to_drag_ratio=0.3
+    )
+    vehicle_callable = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.5, lift_to_drag_ratio=lambda t: 0.3
+    )
+
+    result_float = simulate(vehicle_float, nominal_entry_state)
+    result_callable = simulate(vehicle_callable, nominal_entry_state)
+
+    np.testing.assert_allclose(result_float.velocity, result_callable.velocity, rtol=1e-10)
+    np.testing.assert_allclose(result_float.altitude, result_callable.altitude, rtol=1e-10)
+
+
+def test_time_varying_lift_differs_from_constant(nominal_entry_state):
+    """A time-varying L/D schedule produces a different trajectory than a
+    constant L/D at the mean value."""
+    mean_ld = 0.3
+
+    vehicle_constant = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.5,
+        lift_to_drag_ratio=mean_ld,
+    )
+    # Step schedule: higher L/D first, then lower
+    def step_schedule(t: float) -> float:
+        return 0.5 if t < 100.0 else 0.1
+
+    vehicle_varying = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.5,
+        lift_to_drag_ratio=step_schedule,
+    )
+
+    result_constant = simulate(vehicle_constant, nominal_entry_state)
+    result_varying = simulate(vehicle_varying, nominal_entry_state)
+
+    # The trajectories should differ meaningfully in range
+    range_constant = result_constant.downrange[-1]
+    range_varying = result_varying.downrange[-1]
+    relative_diff = abs(range_varying - range_constant) / range_constant
+
+    assert relative_diff > 0.01, (
+        f"Time-varying L/D gave range {range_varying/1000:.1f} km vs. "
+        f"constant L/D range {range_constant/1000:.1f} km "
+        f"({relative_diff*100:.2f}% difference). Expected >1%."
+    )
+
+
+def test_negative_lift_modulation_prevents_skipout():
+    """A brief negative L/D pulse early in the trajectory prevents skip-out
+    that would otherwise occur with constant positive L/D (Apollo-style
+    guidance)."""
+    # Apollo-like entry conditions
+    entry_state = InitialState(
+        altitude=85_000.0,
+        velocity=11_137.0,
+        flight_path_angle=np.deg2rad(-6.93),
+    )
+
+    # Constant high L/D: causes significant skip
+    vehicle_skip = Vehicle.from_mass_area_cd(
+        mass=5357.0, reference_area=12.0, drag_coefficient=1.2,
+        lift_to_drag_ratio=0.5,
+    )
+
+    # Time-varying: brief negative pulse at start prevents skip
+    def apollo_like_schedule(t: float) -> float:
+        if t < 22.0:
+            return -0.5  # down-control to prevent skip
+        return 0.3  # gentle positive afterwards
+
+    vehicle_guided = Vehicle.from_mass_area_cd(
+        mass=5357.0, reference_area=12.0, drag_coefficient=1.2,
+        lift_to_drag_ratio=apollo_like_schedule,
+    )
+
+    result_skip = simulate(vehicle_skip, entry_state, max_time=3000.0)
+    result_guided = simulate(vehicle_guided, entry_state, max_time=3000.0)
+
+    max_alt_skip = result_skip.altitude.max()
+    max_alt_guided = result_guided.altitude.max()
+
+    # Constant positive L/D causes skip above entry altitude
+    assert max_alt_skip > 85_001.0, "Constant +0.5 L/D should cause skip-out"
+
+    # Guided trajectory should stay at or near entry altitude
+    assert max_alt_guided < max_alt_skip, (
+        f"Guided trajectory reached {max_alt_guided/1000:.1f} km, "
+        f"constant L/D reached {max_alt_skip/1000:.1f} km. "
+        f"Negative lift pulse should suppress skip-out."
+    )
