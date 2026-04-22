@@ -548,3 +548,184 @@ def test_beta_property_with_mach_dependent_cd():
     assert beta_hypersonic != beta_subsonic
     assert abs(beta_hypersonic - 500.0 / (1.0 * 0.8)) < 1e-6
     assert abs(beta_subsonic - 500.0 / (1.5 * 0.8)) < 1e-6
+# ---------------------------------------------------------------------------
+# Bank angle modulation
+# ---------------------------------------------------------------------------
+
+
+def test_zero_bank_matches_planar_flight(nominal_entry_state):
+    """With bank_angle=0, bank-angle-aware code reproduces planar-flight results.
+
+    Two vehicles with the same L/D should give identical trajectories whether
+    bank_angle is left at default (0.0) or explicitly set to 0.0.
+    """
+    v_default = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.5,
+        lift_to_drag_ratio=0.25,
+    )
+    v_explicit = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.5,
+        lift_to_drag_ratio=0.25, bank_angle=0.0,
+    )
+
+    r1 = simulate(v_default, nominal_entry_state)
+    r2 = simulate(v_explicit, nominal_entry_state)
+
+    np.testing.assert_allclose(r1.velocity, r2.velocity, rtol=1e-12)
+    np.testing.assert_allclose(r1.altitude, r2.altitude, rtol=1e-12)
+    np.testing.assert_allclose(r1.flight_path_angle, r2.flight_path_angle, rtol=1e-12)
+    np.testing.assert_allclose(r1.downrange, r2.downrange, rtol=1e-12)
+    # With zero bank and zero initial heading, crossrange should stay zero
+    assert np.max(np.abs(r1.crossrange)) < 1e-6
+    assert np.max(np.abs(r2.crossrange)) < 1e-6
+
+
+def test_bank_90_gives_pure_lateral_lift(nominal_entry_state):
+    """With bank_angle = 90 degrees, lift is entirely lateral — no vertical
+    component. The altitude-velocity profile should match a pure ballistic
+    vehicle (since vertical lift is the only way L/D affects descent).
+    """
+    ballistic = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.5,
+        lift_to_drag_ratio=0.0,
+    )
+    banked_90 = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.5,
+        lift_to_drag_ratio=0.5, bank_angle=np.pi / 2,
+    )
+
+    r_ballistic = simulate(ballistic, nominal_entry_state)
+    r_banked = simulate(banked_90, nominal_entry_state)
+
+    # Peak deceleration and altitude trajectory should match ballistic
+    # (because cos(90 deg) = 0 means zero vertical lift component)
+    peak_ballistic = -np.gradient(r_ballistic.velocity, r_ballistic.time).min() / 9.80665
+    peak_banked = -np.gradient(r_banked.velocity, r_banked.time).min() / 9.80665
+    np.testing.assert_allclose(peak_banked, peak_ballistic, rtol=1e-3)
+
+    # But heading should change due to lateral lift
+    heading_change = np.abs(r_banked.heading[-1] - r_banked.heading[0])
+    assert heading_change > 0.01, (
+        f"90-deg bank should produce lateral heading change, got "
+        f"{np.rad2deg(heading_change):.3f} deg"
+    )
+
+    # And cross-range should grow
+    crossrange_final = np.abs(r_banked.crossrange[-1])
+    assert crossrange_final > 1000.0, (
+        f"90-deg bank should produce significant crossrange, got "
+        f"{crossrange_final:.1f} m"
+    )
+
+
+def test_bank_180_steepens_descent(nominal_entry_state):
+    """With bank_angle = 180 degrees, lift points vertically downward
+    (cos(180) = -1). The vehicle should descend faster than ballistic."""
+    ballistic = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.5,
+        lift_to_drag_ratio=0.0,
+    )
+    inverted = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.5,
+        lift_to_drag_ratio=0.5, bank_angle=np.pi,
+    )
+
+    r_ballistic = simulate(ballistic, nominal_entry_state)
+    r_inverted = simulate(inverted, nominal_entry_state)
+
+    # Inverted lift -> steeper descent -> reaches ground sooner
+    assert r_inverted.time[-1] < r_ballistic.time[-1], (
+        f"180-deg bank should reach ground faster: inverted {r_inverted.time[-1]:.1f}s "
+        f"vs ballistic {r_ballistic.time[-1]:.1f}s"
+    )
+
+    # Peak deceleration should be higher (deeper into atmosphere at high V)
+    peak_ballistic = -np.gradient(r_ballistic.velocity, r_ballistic.time).min() / 9.80665
+    peak_inverted = -np.gradient(r_inverted.velocity, r_inverted.time).min() / 9.80665
+    assert peak_inverted > peak_ballistic, (
+        f"180-deg bank should produce higher peak g than ballistic: "
+        f"inverted {peak_inverted:.2f}g vs ballistic {peak_ballistic:.2f}g"
+    )
+
+
+def test_opposite_bank_mirrors_trajectory(nominal_entry_state):
+    """sigma = +90 deg and sigma = -90 deg should produce mirror-image
+    trajectories: same altitude-velocity profile, opposite crossrange."""
+    bank_positive = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.5,
+        lift_to_drag_ratio=0.5, bank_angle=np.pi / 2,
+    )
+    bank_negative = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.5,
+        lift_to_drag_ratio=0.5, bank_angle=-np.pi / 2,
+    )
+
+    r_pos = simulate(bank_positive, nominal_entry_state)
+    r_neg = simulate(bank_negative, nominal_entry_state)
+
+    # Velocity and altitude histories should be identical (bank direction
+    # doesn't affect in-plane dynamics when initial heading is zero)
+    np.testing.assert_allclose(r_pos.velocity, r_neg.velocity, rtol=1e-8)
+    np.testing.assert_allclose(r_pos.altitude, r_neg.altitude, rtol=1e-8)
+
+    # Crossrange should mirror (opposite signs)
+    np.testing.assert_allclose(r_pos.crossrange, -r_neg.crossrange, rtol=1e-6, atol=1e-3)
+    # Heading should mirror
+    np.testing.assert_allclose(r_pos.heading, -r_neg.heading, rtol=1e-6, atol=1e-6)
+
+
+def test_bank_angle_callable_invoked(nominal_entry_state):
+    """A time-varying bank angle callable should be invoked during integration."""
+    call_count = {"n": 0}
+
+    def bank_schedule(t: float) -> float:
+        call_count["n"] += 1
+        return np.pi / 4 * np.sin(t / 50.0)  # oscillating bank
+
+    vehicle = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.5,
+        lift_to_drag_ratio=0.3, bank_angle=bank_schedule,
+    )
+
+    simulate(vehicle, nominal_entry_state)
+
+    assert call_count["n"] > 100, (
+        f"Bank-angle callable should be invoked many times during integration, "
+        f"got {call_count['n']} calls"
+    )
+
+
+def test_initial_heading_affects_downrange_and_crossrange():
+    """Nonzero initial heading with zero bank angle should still produce
+    crossrange motion — the vehicle is moving at an angle to the downrange axis.
+    """
+    vehicle = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.5,
+        lift_to_drag_ratio=0.0,  # ballistic
+    )
+
+    # Two entry states: one along downrange axis, one at 30 deg offset
+    state_straight = InitialState(
+        altitude=80000.0, velocity=7500.0,
+        flight_path_angle=np.deg2rad(-5.0),
+        heading=0.0,
+    )
+    state_angled = InitialState(
+        altitude=80000.0, velocity=7500.0,
+        flight_path_angle=np.deg2rad(-5.0),
+        heading=np.deg2rad(30.0),
+    )
+
+    r_straight = simulate(vehicle, state_straight)
+    r_angled = simulate(vehicle, state_angled)
+
+    # Both vehicles should travel the same total horizontal distance
+    # (same velocity, same flight path, no lift)
+    total_straight = np.sqrt(r_straight.downrange[-1]**2 + r_straight.crossrange[-1]**2)
+    total_angled = np.sqrt(r_angled.downrange[-1]**2 + r_angled.crossrange[-1]**2)
+    np.testing.assert_allclose(total_angled, total_straight, rtol=1e-3)
+
+    # The angled one should have substantial crossrange
+    assert abs(r_angled.crossrange[-1]) > 0.1 * abs(r_angled.downrange[-1])
+    # The straight one should have ~zero crossrange
+    assert abs(r_straight.crossrange[-1]) < 1.0
