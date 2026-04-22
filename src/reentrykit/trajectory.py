@@ -41,15 +41,17 @@ import numpy as np
 from scipy.integrate import solve_ivp
 
 from reentrykit.atmosphere import MAX_ALTITUDE, MAX_EXTENDED_ALTITUDE, us1976
+from reentrykit.planet import EARTH, PlanetModel
 
 # Type aliases: constant float or time-varying callable
 LiftToDragSpec = Union[float, Callable[[float], float]]
 DragSpec = Union[float, Callable[[float], float]]
 BankAngleSpec = Union[float, Callable[[float], float]]
 
-# Physical constants
-G0 = 9.80665              # [m/s^2], standard gravitational acceleration
-EARTH_RADIUS = 6378137.0  # [m], WGS-84 equatorial radius
+# Physical constants come from the PlanetModel passed to simulate().
+# The legacy constant G0 is kept as an import for backward compatibility
+# with code that computes Allen-Eggers predictions at sea level.
+G0 = 9.80665              # [m/s^2], standard gravitational acceleration at Earth's surface
 
 # Numerical guards
 _MIN_ALTITUDE = 0.0   # [m], ground impact
@@ -138,6 +140,7 @@ def _derivatives(
     time: float,
     state: np.ndarray,
     vehicle: Vehicle,
+    planet: PlanetModel,
 ) -> list[float]:
     """Equations of motion for 3-DOF point-mass flight with bank angle.
 
@@ -146,11 +149,10 @@ def _derivatives(
     """
     velocity, flight_path_angle, heading, altitude, _downrange, _crossrange = state
 
-    # Atmosphere (US1976 below 86 km, exponential extension to 200 km)
-    atmo = us1976(altitude)
+    # Atmosphere from the planet model
+    atmo = planet.atmosphere(altitude)
     density = atmo.density
     speed_of_sound = atmo.speed_of_sound
-
     # Mach for Cd lookup
     mach = velocity / speed_of_sound if velocity > 1.0 else 0.0
 
@@ -173,8 +175,9 @@ def _derivatives(
     vertical_lift_accel = drag_accel * ld_value * cos_sigma
     lateral_lift_accel = drag_accel * ld_value * sin_sigma
 
-    # Geometry
-    r = EARTH_RADIUS + altitude
+    # Geometry and altitude-dependent gravity
+    r = planet.radius + altitude
+    g = planet.gravity(altitude)
     sin_gamma = np.sin(flight_path_angle)
     cos_gamma = np.cos(flight_path_angle)
     sin_psi = np.sin(heading)
@@ -183,16 +186,18 @@ def _derivatives(
     # Guard against gamma singularity at +/- 90 deg (never occurs for reentry)
     cos_gamma_safe = np.sign(cos_gamma) * max(abs(cos_gamma), _COS_GAMMA_FLOOR)
 
-    # Equations of motion (Vinh-Busemann-Culp, non-rotating Earth)
-    dV_dt = -drag_accel - G0 * sin_gamma
+    # Equations of motion (Vinh-Busemann-Culp, non-rotating planet)
+    # Note: g is altitude-dependent (g = mu / r^2), not the sea-level constant.
+    # Rotating-planet Coriolis and centrifugal terms will be added in Phase 2.
+    dV_dt = -drag_accel - g * sin_gamma
     dgamma_dt = (
         vertical_lift_accel / velocity
-        - (G0 / velocity - velocity / r) * cos_gamma
+        - (g / velocity - velocity / r) * cos_gamma
     )
     dpsi_dt = lateral_lift_accel / (velocity * cos_gamma_safe)
     dh_dt = velocity * sin_gamma
-    ds_dt = EARTH_RADIUS * velocity * cos_gamma * cos_psi / r
-    dy_dt = EARTH_RADIUS * velocity * cos_gamma * sin_psi / r
+    ds_dt = planet.radius * velocity * cos_gamma * cos_psi / r
+    dy_dt = planet.radius * velocity * cos_gamma * sin_psi / r
 
     return [dV_dt, dgamma_dt, dpsi_dt, dh_dt, ds_dt, dy_dt]
 
@@ -200,6 +205,7 @@ def _derivatives(
 def simulate(
     vehicle: Vehicle,
     initial_state: InitialState,
+    planet: PlanetModel = EARTH,
     max_time: float = 1000.0,
     dt_output: float = 0.1,
 ) -> TrajectoryResult:
@@ -208,10 +214,10 @@ def simulate(
     Terminates on ground impact (h = 0) or skip-out above the 200 km
     extended atmosphere ceiling.
     """
-    if initial_state.altitude < 0.0 or initial_state.altitude > MAX_EXTENDED_ALTITUDE:
+    if initial_state.altitude < 0.0 or initial_state.altitude > planet.max_atmosphere_altitude:
         raise ValueError(
             f"Initial altitude {initial_state.altitude} m is outside the "
-            f"valid atmosphere range [0, {MAX_EXTENDED_ALTITUDE}] m."
+            f"valid atmosphere range [0, {planet.max_atmosphere_altitude}] m for {planet.name}."
         )
     if initial_state.velocity <= 0.0:
         raise ValueError(f"Initial velocity must be positive, got {initial_state.velocity} m/s.")
@@ -228,14 +234,14 @@ def simulate(
 
     t_eval = np.arange(0.0, max_time, dt_output)
 
-    def ground_impact(time: float, state: np.ndarray, vehicle: Vehicle) -> float:
+    def ground_impact(time: float, state: np.ndarray, vehicle: Vehicle, planet: PlanetModel) -> float:
         return state[3] - _MIN_ALTITUDE
 
     ground_impact.terminal = True
     ground_impact.direction = -1
 
-    def skip_out(time: float, state: np.ndarray, vehicle: Vehicle) -> float:
-        return MAX_EXTENDED_ALTITUDE - state[3]
+    def skip_out(time: float, state: np.ndarray, vehicle: Vehicle, planet: PlanetModel) -> float:
+        return planet.max_atmosphere_altitude - state[3]
 
     skip_out.terminal = True
     skip_out.direction = -1
@@ -244,7 +250,7 @@ def simulate(
         fun=_derivatives,
         t_span=(0.0, max_time),
         y0=y0,
-        args=(vehicle,),
+        args=(vehicle, planet),
         method="RK45",
         events=(ground_impact, skip_out),
         t_eval=t_eval,
@@ -270,8 +276,8 @@ def simulate(
     downrange = solution.y[4]
     crossrange = solution.y[5]
 
-    densities = np.array([us1976(h).density for h in altitude])
-    speeds_of_sound = np.array([us1976(h).speed_of_sound for h in altitude])
+    densities = np.array([planet.atmosphere(h).density for h in altitude])
+    speeds_of_sound = np.array([planet.atmosphere(h).speed_of_sound for h in altitude])
     mach = velocity / speeds_of_sound
     dynamic_pressure = 0.5 * densities * velocity**2
 
