@@ -133,8 +133,9 @@ def test_vacuum_ballistic_return_velocity():
     anyway.
     """
     vehicle = Vehicle(
-        ballistic_coefficient=1e12,  # effectively drag-free
+        reference_area=0.8,
         mass=500.0,
+        drag_coefficient=0.0,  # drag-free for vacuum test
         lift_to_drag_ratio=0.0,
         nose_radius=0.1,
     )
@@ -411,4 +412,139 @@ def test_negative_lift_modulation_prevents_skipout():
         f"constant L/D reached {max_alt_skip/1000:.1f} km. "
         f"Negative lift pulse should suppress skip-out."
     )
-    
+# ---------------------------------------------------------------------------
+# Mach-dependent drag coefficient
+# ---------------------------------------------------------------------------
+
+
+def test_constant_cd_matches_callable_at_same_value(nominal_entry_state):
+    """Cd=1.5 as a constant and `lambda m: 1.5` as a callable produce
+    identical trajectories — no hidden side effects from the callable path."""
+    vehicle_const = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.5,
+    )
+    vehicle_callable = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=lambda m: 1.5,
+    )
+
+    result_const = simulate(vehicle_const, nominal_entry_state)
+    result_callable = simulate(vehicle_callable, nominal_entry_state)
+
+    np.testing.assert_allclose(result_const.velocity, result_callable.velocity, rtol=1e-10)
+    np.testing.assert_allclose(result_const.altitude, result_callable.altitude, rtol=1e-10)
+    np.testing.assert_allclose(result_const.downrange, result_callable.downrange, rtol=1e-10)
+
+
+def test_mach_dependent_cd_differs_from_constant(nominal_entry_state):
+    """A Mach-varying Cd produces different peak g than a constant Cd
+    at one of the two endpoint values."""
+    def stepped_cd(mach: float) -> float:
+        """Sphere-cone-like profile: higher Cd at low Mach, lower at hypersonic."""
+        if mach > 10.0:
+            return 1.0
+        elif mach > 1.5:
+            return 1.3
+        else:
+            return 0.8
+
+    vehicle_variable = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=stepped_cd,
+    )
+    vehicle_hypersonic = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.0,
+    )
+    vehicle_transonic = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.3,
+    )
+
+    result_variable = simulate(vehicle_variable, nominal_entry_state)
+    result_hypersonic = simulate(vehicle_hypersonic, nominal_entry_state)
+    result_transonic = simulate(vehicle_transonic, nominal_entry_state)
+
+    # Peak decelerations
+    peak_variable = -np.gradient(result_variable.velocity, result_variable.time).min()
+    peak_hypersonic = -np.gradient(result_hypersonic.velocity, result_hypersonic.time).min()
+    peak_transonic = -np.gradient(result_transonic.velocity, result_transonic.time).min()
+
+    # Variable-Cd peak should differ from both endpoint-constant cases
+    assert abs(peak_variable - peak_hypersonic) > 0.01 * peak_hypersonic
+    assert abs(peak_variable - peak_transonic) > 0.01 * peak_transonic
+
+
+def test_cd_callable_invoked_each_step():
+    """Verify the Cd callable is actually called during integration, not just once."""
+    call_count = {"count": 0, "mach_values": []}
+
+    def counting_cd(mach: float) -> float:
+        call_count["count"] += 1
+        call_count["mach_values"].append(mach)
+        return 1.5
+
+    vehicle = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=counting_cd,
+    )
+    state = InitialState(
+        altitude=80000.0,
+        velocity=7500.0,
+        flight_path_angle=np.deg2rad(-5.0),
+    )
+
+    result = simulate(vehicle, state)
+
+    # Integration should call Cd many times (one per RK45 sub-step)
+    assert call_count["count"] > 100, (
+        f"Cd callable was invoked only {call_count['count']} times; "
+        f"expected hundreds of evaluations during integration."
+    )
+
+    # Mach values should span a wide range as the vehicle decelerates
+    mach_range = max(call_count["mach_values"]) - min(call_count["mach_values"])
+    assert mach_range > 5.0, (
+        f"Mach range seen by Cd callable was {mach_range:.1f}; "
+        f"expected at least 5 from entry hypersonic to subsonic."
+    )
+
+
+def test_primary_constructor_and_classmethod_are_equivalent():
+    """Vehicle(...) and Vehicle.from_mass_area_cd(...) produce identical vehicles."""
+    v1 = Vehicle(
+        reference_area=0.8,
+        mass=500.0,
+        drag_coefficient=1.5,
+        lift_to_drag_ratio=0.2,
+        nose_radius=0.15,
+    )
+    v2 = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.5,
+        lift_to_drag_ratio=0.2, nose_radius=0.15,
+    )
+
+    assert v1 == v2
+
+
+def test_beta_property_with_constant_cd():
+    """Vehicle.beta() returns m / (Cd * S) for constant Cd, any Mach."""
+    v = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.5,
+    )
+    expected_beta = 500.0 / (1.5 * 0.8)
+    assert abs(v.beta(mach=10.0) - expected_beta) < 1e-6
+    assert abs(v.beta(mach=2.0) - expected_beta) < 1e-6
+    # Default Mach should also give the same value for constant Cd
+    assert abs(v.beta() - expected_beta) < 1e-6
+
+
+def test_beta_property_with_mach_dependent_cd():
+    """Vehicle.beta() varies with Mach when Cd is Mach-dependent."""
+    def cd_function(mach: float) -> float:
+        return 1.0 if mach > 5.0 else 1.5
+
+    v = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=cd_function,
+    )
+    beta_hypersonic = v.beta(mach=20.0)
+    beta_subsonic = v.beta(mach=0.5)
+
+    assert beta_hypersonic != beta_subsonic
+    assert abs(beta_hypersonic - 500.0 / (1.0 * 0.8)) < 1e-6
+    assert abs(beta_subsonic - 500.0 / (1.5 * 0.8)) < 1e-6

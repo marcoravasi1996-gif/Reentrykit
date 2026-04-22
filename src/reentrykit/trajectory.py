@@ -25,6 +25,9 @@ from typing import Callable, NamedTuple, Union
 # Type alias: L/D can be a constant float or a function of time [seconds]
 LiftToDragSpec = Union[float, Callable[[float], float]]
 
+# Type alias: Cd can be a constant float or a function of Mach number
+DragSpec = Union[float, Callable[[float], float]]
+
 import numpy as np
 from scipy.integrate import solve_ivp
 
@@ -41,52 +44,69 @@ _MIN_ALTITUDE = 0.0  # trajectory terminates at this altitude [m]
 class Vehicle(NamedTuple):
     """Aerodynamic and mass properties of a reentry vehicle.
 
-    Characterized by ballistic coefficient beta = m / (Cd * S), which is
-    the natural parameterization for trajectory dynamics — only beta (not
-    mass, area, or Cd individually) appears in the ballistic equations of
-    motion.
+    The vehicle is parameterized by its physical properties (mass, reference
+    area, drag coefficient). The drag coefficient can be either constant or
+    a callable of Mach number, allowing high-fidelity modeling of Cd variation
+    across flow regimes (free-molecular, transitional, continuum hypersonic,
+    transonic, subsonic).
 
-    Lift is specified as lift-to-drag ratio, which can be either:
-    - A constant float (for constant-L/D flight, including pure ballistic
-      when L/D = 0)
-    - A callable taking time [s] and returning L/D, for time-varying
-      trajectories such as Apollo's guided skip-glide. This enables
-      replicating published control-input schedules like those in
-      Tetzman (2010) Chapter 3.
+    Lift is specified as a lift-to-drag ratio — constant or a callable of time.
+    For ballistic flight, leave `lift_to_drag_ratio` at its default of 0.0.
+
+    Ballistic coefficient β = m / (Cd · S) is no longer a stored attribute
+    because it varies with Mach when Cd varies. To compute instantaneous β at
+    a given Mach, use `vehicle.beta(mach)`.
 
     Nose radius and mass are carried through for downstream analyses
-    (aerothermal heating, structural loads) but do not affect the
-    translational trajectory.
+    (aerothermal heating, structural loads).
     """
 
-    ballistic_coefficient: float  # [kg/m^2], beta = m / (Cd * S)
-    mass: float  # [kg], for structural and thermal analyses
+    reference_area: float              # [m^2], vehicle frontal area
+    mass: float                        # [kg]
+    drag_coefficient: DragSpec = 1.0   # [-] or callable(mach) -> Cd
     lift_to_drag_ratio: LiftToDragSpec = 0.0  # [-] or callable(t_sec) -> L/D
-    nose_radius: float = 0.1  # [m], for stagnation-point heating
+    nose_radius: float = 0.1           # [m], for stagnation-point heating
 
     @classmethod
     def from_mass_area_cd(
         cls,
         mass: float,
         reference_area: float,
-        drag_coefficient: float,
+        drag_coefficient: DragSpec,
         lift_to_drag_ratio: LiftToDragSpec = 0.0,
         nose_radius: float = 0.1,
     ) -> "Vehicle":
-        """Construct a Vehicle from individual m, S, Cd values.
+        """Construct a Vehicle from mass, reference area, and drag coefficient.
 
-        Useful when specifying vehicles with traditional aerodynamic
-        parameters rather than a directly-known ballistic coefficient.
-        The lift_to_drag_ratio may be a constant or a callable of time [s].
+        This classmethod preserves backward compatibility with code written
+        when `ballistic_coefficient` was the primary parameter. Using the
+        primary constructor `Vehicle(reference_area=..., mass=..., ...)` is
+        equivalent.
+
+        The `drag_coefficient` may be a constant or a callable of Mach number,
+        enabling Mach-dependent Cd modeling. The `lift_to_drag_ratio` may be
+        a constant or a callable of time [s].
         """
-        beta = mass / (drag_coefficient * reference_area)
         return cls(
-            ballistic_coefficient=beta,
+            reference_area=reference_area,
             mass=mass,
+            drag_coefficient=drag_coefficient,
             lift_to_drag_ratio=lift_to_drag_ratio,
             nose_radius=nose_radius,
         )
 
+    def beta(self, mach: float = 10.0) -> float:
+        """Instantaneous ballistic coefficient [kg/m^2] at a given Mach.
+
+        β = m / (Cd · S). For constant Cd, this value is constant.
+        For Mach-dependent Cd, β varies with Mach.
+
+        Default Mach of 10 gives a representative hypersonic value for
+        reentry mission design.
+        """
+        cd = self.drag_coefficient
+        cd_value = cd(mach) if callable(cd) else cd
+        return self.mass / (cd_value * self.reference_area)
 class InitialState(NamedTuple):
     """Initial state of the vehicle at the start of integration."""
 
@@ -129,14 +149,23 @@ def _derivatives(
     """
     velocity, flight_path_angle, altitude, _downrange = state
 
-    # Atmospheric properties at current altitude. us1976() now handles the
-    # full 0-200 km range, with an exponential extension above 86 km.
-    density = us1976(altitude).density
+    # Atmospheric properties at current altitude. us1976() handles 0-200 km
+    # via US1976 below 86 km and exponential extension above.
+    atmo = us1976(altitude)
+    density = atmo.density
+    speed_of_sound = atmo.speed_of_sound
 
-    # Drag and lift accelerations expressed via ballistic coefficient.
-    # a_drag = (1/2) * rho * V^2 / beta   [m/s^2]
-    # a_lift = a_drag * (L/D)
-    drag_accel = 0.5 * density * velocity**2 / vehicle.ballistic_coefficient
+    # Mach number — used to evaluate Cd if it is Mach-dependent.
+    # Guard against division by zero when velocity is near zero (end of flight).
+    mach = velocity / speed_of_sound if velocity > 1.0 else 0.0
+
+    # Evaluate Cd: constant float or callable(mach) -> Cd
+    cd = vehicle.drag_coefficient
+    cd_value = cd(mach) if callable(cd) else cd
+
+    # Drag acceleration: a = (1/2) * rho * V^2 * Cd * S / m
+    drag_accel = 0.5 * density * velocity**2 * cd_value * vehicle.reference_area / vehicle.mass
+
     # Evaluate L/D: constant float or callable(t_sec) -> L/D
     ld = vehicle.lift_to_drag_ratio
     ld_value = ld(time) if callable(ld) else ld
