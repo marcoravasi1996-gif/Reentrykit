@@ -32,13 +32,11 @@ def reference_vehicle() -> Vehicle:
 
 
 @pytest.fixture
-def nominal_entry_state() -> InitialState:
-    """Nominal reentry conditions from 80 km at orbital velocity."""
+def nominal_entry_state():
     return InitialState(
-        altitude=80000.0,
+        altitude=80_000.0,
         velocity=7500.0,
         flight_path_angle=np.deg2rad(-5.0),
-        downrange=0.0,
     )
 
 
@@ -708,37 +706,220 @@ def test_bank_angle_callable_invoked(nominal_entry_state):
     )
 
 
-def test_initial_heading_affects_downrange_and_crossrange():
-    """Nonzero initial heading with zero bank angle should still produce
-    crossrange motion — the vehicle is moving at an angle to the downrange axis.
+def test_initial_heading_changes_landing_location():
+    """Different initial headings send a ballistic vehicle to different
+    geographic endpoints, even though total ground-track distance is the same.
+
+    With the Phase 2 lat/lon equations, downrange is measured along the
+    initial heading direction — so a ballistic trajectory has zero
+    crossrange by construction. The observable effect of initial heading
+    is on final latitude/longitude.
     """
     vehicle = Vehicle.from_mass_area_cd(
         mass=500.0, reference_area=0.8, drag_coefficient=1.5,
         lift_to_drag_ratio=0.0,  # ballistic
     )
 
-    # Two entry states: one along downrange axis, one at 30 deg offset
-    state_straight = InitialState(
+    state_north = InitialState(
         altitude=80000.0, velocity=7500.0,
         flight_path_angle=np.deg2rad(-5.0),
-        heading=0.0,
+        heading=0.0,  # due north
     )
-    state_angled = InitialState(
+    state_east = InitialState(
         altitude=80000.0, velocity=7500.0,
         flight_path_angle=np.deg2rad(-5.0),
-        heading=np.deg2rad(30.0),
+        heading=np.pi / 2,  # due east
     )
 
-    r_straight = simulate(vehicle, state_straight)
-    r_angled = simulate(vehicle, state_angled)
+    r_north = simulate(vehicle, state_north)
+    r_east = simulate(vehicle, state_east)
 
-    # Both vehicles should travel the same total horizontal distance
-    # (same velocity, same flight path, no lift)
-    total_straight = np.sqrt(r_straight.downrange[-1]**2 + r_straight.crossrange[-1]**2)
-    total_angled = np.sqrt(r_angled.downrange[-1]**2 + r_angled.crossrange[-1]**2)
-    np.testing.assert_allclose(total_angled, total_straight, rtol=1e-3)
+    # Same total downrange regardless of heading (ballistic, spherical Earth)
+    np.testing.assert_allclose(
+        r_north.downrange[-1], r_east.downrange[-1], rtol=1e-3,
+    )
 
-    # The angled one should have substantial crossrange
-    assert abs(r_angled.crossrange[-1]) > 0.1 * abs(r_angled.downrange[-1])
-    # The straight one should have ~zero crossrange
-    assert abs(r_straight.crossrange[-1]) < 1.0
+    # Crossrange is near zero for ballistic flight (no lateral lift)
+    assert abs(r_north.crossrange[-1]) < 100.0  # under 100 m
+    assert abs(r_east.crossrange[-1]) < 100.0
+
+    # Northbound trajectory ends with higher latitude than eastbound
+    assert r_north.latitude[-1] > r_east.latitude[-1]
+
+    # Eastbound trajectory ends with higher longitude than northbound
+    assert r_east.longitude[-1] > r_north.longitude[-1]
+
+# ---------------------------------------------------------------------------
+# Rotating Earth (Coriolis and centrifugal effects)
+# ---------------------------------------------------------------------------
+
+
+def _ballistic_vehicle_at_latitude(latitude_deg: float, heading_deg: float):
+    """Build a ballistic vehicle and entry state at the given latitude/heading."""
+    vehicle = Vehicle.from_mass_area_cd(
+        mass=500.0, reference_area=0.8, drag_coefficient=1.5,
+    )
+    state = InitialState(
+        altitude=80000.0,
+        velocity=7500.0,
+        flight_path_angle=np.deg2rad(-5.0),
+        heading=np.deg2rad(heading_deg),
+        latitude=np.deg2rad(latitude_deg),
+        longitude=0.0,
+    )
+    return vehicle, state
+
+
+def test_non_rotating_earth_reproduces_default_behavior():
+    """Passing EARTH_NON_ROTATING explicitly matches the default planet
+    (which is also EARTH_NON_ROTATING in Phase 2)."""
+    from reentrykit.planet import EARTH_NON_ROTATING
+
+    vehicle, state = _ballistic_vehicle_at_latitude(0.0, 90.0)
+
+    r_default = simulate(vehicle, state)
+    r_explicit = simulate(vehicle, state, planet=EARTH_NON_ROTATING)
+
+    np.testing.assert_allclose(r_default.velocity, r_explicit.velocity, rtol=1e-12)
+    np.testing.assert_allclose(r_default.altitude, r_explicit.altitude, rtol=1e-12)
+    np.testing.assert_allclose(r_default.latitude, r_explicit.latitude, rtol=1e-12)
+
+
+def test_rotating_earth_ballistic_eastward_has_reduced_effective_gravity():
+    """A ballistic vehicle flying due east at the equator experiences a
+    reduced effective gravity due to centrifugal + Coriolis pull-up.
+    The trajectory reaches higher altitudes at each velocity than the
+    non-rotating equivalent."""
+    from reentrykit.planet import EARTH, EARTH_NON_ROTATING
+
+    # Start at equator flying due east (where Coriolis pull-up is maximal
+    # for eastward flight)
+    vehicle, state = _ballistic_vehicle_at_latitude(0.0, 90.0)
+
+    r_rotating = simulate(vehicle, state, planet=EARTH)
+    r_static = simulate(vehicle, state, planet=EARTH_NON_ROTATING)
+
+    # At similar velocity points, rotating-earth trajectory should be higher
+    # (less gravity pulling down → descends slower)
+    # Find a mid-trajectory velocity value
+    v_target = 5000.0
+    i_rot = int(np.argmin(np.abs(r_rotating.velocity - v_target)))
+    i_stat = int(np.argmin(np.abs(r_static.velocity - v_target)))
+
+    assert r_rotating.altitude[i_rot] > r_static.altitude[i_stat], (
+        f"Rotating Earth (eastward) should give higher altitude at V=5000: "
+        f"rot={r_rotating.altitude[i_rot]:.0f} m, "
+        f"static={r_static.altitude[i_stat]:.0f} m"
+    )
+
+
+def test_rotating_earth_westward_vs_eastward_differs_at_mid_latitude():
+    """At a mid-latitude, eastward flight experiences more centrifugal-like
+    pull-up than westward (the vehicle is co-rotating vs counter-rotating
+    with Earth). Descent profiles differ accordingly."""
+    from reentrykit.planet import EARTH
+
+    # Fly from 45 deg N, once eastward and once westward
+    vehicle, state_east = _ballistic_vehicle_at_latitude(45.0, 90.0)
+    _, state_west = _ballistic_vehicle_at_latitude(45.0, 270.0)
+
+    r_east = simulate(vehicle, state_east, planet=EARTH)
+    r_west = simulate(vehicle, state_west, planet=EARTH)
+
+    # Compare peak g: eastward vehicle is co-rotating, sees reduced effective
+    # gravity, descends more gradually, encounters peak g at different time
+    peak_east = -np.gradient(r_east.velocity, r_east.time).min() / 9.80665
+    peak_west = -np.gradient(r_west.velocity, r_west.time).min() / 9.80665
+
+    # Expect a measurable difference (even if small) between eastward and westward
+    relative_diff = abs(peak_east - peak_west) / peak_east
+    assert relative_diff > 1e-4, (
+        f"Expected rotating-Earth to produce measurable E/W asymmetry at "
+        f"mid-latitudes, got peak_east={peak_east:.4f}, peak_west={peak_west:.4f}, "
+        f"diff={relative_diff*100:.4f}%"
+    )
+
+
+def test_rotating_earth_coriolis_deflects_heading_northward_flight():
+    """A ballistic vehicle flying due north from the equator experiences
+    Coriolis heading drift. In the northern hemisphere, rightward Coriolis
+    deflection rotates heading clockwise → toward the east.
+
+    Heading is measured at peak deceleration rather than at ground impact,
+    because the 3-DOF parameterization has a mathematical singularity in
+    heading as the flight-path angle approaches ±90° (terminal vertical
+    fall). This singularity is not a physics problem — heading is simply
+    undefined for vertical motion — but it does mean our test has to
+    sample heading while the trajectory is still well-behaved.
+    """
+    from reentrykit.planet import EARTH, EARTH_NON_ROTATING
+
+    # Fly due north from the equator
+    vehicle, state = _ballistic_vehicle_at_latitude(0.0, 0.0)
+
+    r_rotating = simulate(vehicle, state, planet=EARTH)
+    r_static = simulate(vehicle, state, planet=EARTH_NON_ROTATING)
+
+    # Measure heading at peak deceleration (well-behaved, physically meaningful)
+    dV_dt = np.gradient(r_rotating.velocity, r_rotating.time)
+    i_peak = dV_dt.argmin()
+
+    heading_at_peak = r_rotating.heading[i_peak]
+    heading_static_at_peak = r_static.heading[i_peak]
+
+    heading_drift = heading_at_peak - heading_static_at_peak
+    # Physics estimate at peak deceleration (~30s into flight, latitude ~2 deg):
+    # Coriolis rate ~ 2*Omega*sin(phi) ~ 5e-6 rad/s, integrated over ~30s
+    # gives ~0.01 deg. Using 0.005 deg as threshold for clear detection
+    # above numerical noise.
+    assert heading_drift > np.deg2rad(0.005), (
+        f"Expected Coriolis-induced heading drift > 0.005 deg at peak deceleration "
+        f"for N-bound flight on rotating Earth, got "
+        f"{np.rad2deg(heading_drift):.4f} deg"
+    )
+
+    # Also verify sign: northern-hemisphere Coriolis deflects rightward (east).
+    # In our aerospace convention, eastward deflection means positive dpsi.
+    assert heading_drift > 0, (
+        f"Expected positive heading drift (eastward) for N-bound flight in "
+        f"northern hemisphere, got {np.rad2deg(heading_drift):.4f} deg"
+    )
+
+
+def test_rotating_earth_stardust_peak_g_similar_to_non_rotating():
+    """Stardust-class validation: peak g should be nearly unchanged by Earth
+    rotation. The ballistic coefficient and entry conditions dominate; Coriolis
+    and centrifugal are small perturbations over the short Stardust trajectory.
+
+    This ensures Phase 2 doesn't silently break Stardust/Genesis validations.
+    """
+    from reentrykit.planet import EARTH, EARTH_NON_ROTATING
+
+    # Stardust-like vehicle and entry
+    vehicle = Vehicle.from_mass_area_cd(
+        mass=45.8, reference_area=np.pi * (0.811 / 2) ** 2,
+        drag_coefficient=1.0,
+    )
+    state = InitialState(
+        altitude=125000.0,
+        velocity=12600.0,
+        flight_path_angle=np.deg2rad(-8.2),
+        heading=np.deg2rad(90.0),  # due east
+        latitude=np.deg2rad(0.0),
+        longitude=0.0,
+    )
+
+    r_rotating = simulate(vehicle, state, planet=EARTH, max_time=500.0, dt_output=0.05)
+    r_static = simulate(vehicle, state, planet=EARTH_NON_ROTATING, max_time=500.0, dt_output=0.05)
+
+    peak_rot = -np.gradient(r_rotating.velocity, r_rotating.time).min() / 9.80665
+    peak_stat = -np.gradient(r_static.velocity, r_static.time).min() / 9.80665
+
+    # Peak g differs by at most a few percent (Stardust is short enough
+    # that rotation effects don't accumulate dramatically)
+    relative_diff = abs(peak_rot - peak_stat) / peak_stat
+    assert relative_diff < 0.05, (
+        f"Stardust peak g on rotating vs non-rotating Earth should differ by "
+        f"<5%, got rot={peak_rot:.2f}, stat={peak_stat:.2f}, "
+        f"diff={relative_diff*100:.2f}%"
+    )
