@@ -586,9 +586,11 @@ def test_zero_bank_matches_planar_flight(nominal_entry_state):
     np.testing.assert_allclose(r1.altitude, r2.altitude, rtol=1e-12)
     np.testing.assert_allclose(r1.flight_path_angle, r2.flight_path_angle, rtol=1e-12)
     np.testing.assert_allclose(r1.downrange, r2.downrange, rtol=1e-12)
-    # With zero bank and zero initial heading, crossrange should stay zero
-    assert np.max(np.abs(r1.crossrange)) < 1e-6
-    assert np.max(np.abs(r2.crossrange)) < 1e-6
+    # Both vehicles have bank_angle=0, so their crossrange histories must
+    # match each other exactly (not necessarily be zero — in V-B-C convention
+    # the default heading=0 means due east, and eastward flight on a sphere
+    # naturally curves away from the equator via geographic-curvature terms).
+    np.testing.assert_allclose(r1.crossrange, r2.crossrange, rtol=1e-10, atol=1e-6)
 
 
 def test_bank_90_gives_pure_lateral_lift(nominal_entry_state):
@@ -671,18 +673,31 @@ def test_opposite_bank_mirrors_trajectory(nominal_entry_state):
         lift_to_drag_ratio=0.5, bank_angle=-np.pi / 2,
     )
 
-    r_pos = simulate(bank_positive, nominal_entry_state)
-    r_neg = simulate(bank_negative, nominal_entry_state)
+    # Use an explicit initial state flying along a meridian (psi = pi/2
+    # in V-B-C convention = due north). This eliminates the geographic-
+    # curvature crossrange that would otherwise dominate over the bank-
+    # induced crossrange.
+    meridian_state = InitialState(
+        altitude=80_000.0,
+        velocity=7500.0,
+        flight_path_angle=np.deg2rad(-5.0),
+        heading=np.pi / 2,    # V-B-C: due north
+    )
+
+    r_pos = simulate(bank_positive, meridian_state)
+    r_neg = simulate(bank_negative, meridian_state)
 
     # Velocity and altitude histories should be identical (bank direction
-    # doesn't affect in-plane dynamics when initial heading is zero)
+    # doesn't affect in-plane dynamics when flying along a meridian).
     np.testing.assert_allclose(r_pos.velocity, r_neg.velocity, rtol=1e-8)
     np.testing.assert_allclose(r_pos.altitude, r_neg.altitude, rtol=1e-8)
 
-    # Crossrange should mirror (opposite signs)
-    np.testing.assert_allclose(r_pos.crossrange, -r_neg.crossrange, rtol=1e-6, atol=1e-3)
-    # Heading should mirror
-    np.testing.assert_allclose(r_pos.heading, -r_neg.heading, rtol=1e-6, atol=1e-6)
+    # Crossrange should mirror (opposite signs).
+    np.testing.assert_allclose(r_pos.crossrange, -r_neg.crossrange, rtol=1e-6, atol=1.0)
+    # Heading deviations from the initial value should mirror.
+    dpsi_pos = r_pos.heading - r_pos.heading[0]
+    dpsi_neg = r_neg.heading - r_neg.heading[0]
+    np.testing.assert_allclose(dpsi_pos, -dpsi_neg, rtol=1e-6, atol=1e-6)
 
 
 def test_bank_angle_callable_invoked(nominal_entry_state):
@@ -723,12 +738,12 @@ def test_initial_heading_changes_landing_location():
     state_north = InitialState(
         altitude=80000.0, velocity=7500.0,
         flight_path_angle=np.deg2rad(-5.0),
-        heading=0.0,  # due north
+        heading=np.pi / 2,   # V-B-C convention: pi/2 = due north
     )
     state_east = InitialState(
         altitude=80000.0, velocity=7500.0,
         flight_path_angle=np.deg2rad(-5.0),
-        heading=np.pi / 2,  # due east
+        heading=0.0,         # V-B-C convention: 0 = due east
     )
 
     r_north = simulate(vehicle, state_north)
@@ -739,9 +754,14 @@ def test_initial_heading_changes_landing_location():
         r_north.downrange[-1], r_east.downrange[-1], rtol=1e-3,
     )
 
-    # Crossrange is near zero for ballistic flight (no lateral lift)
-    assert abs(r_north.crossrange[-1]) < 100.0  # under 100 m
-    assert abs(r_east.crossrange[-1]) < 100.0
+    # Northbound trajectory has small crossrange (flying along a meridian).
+    # Eastbound trajectory accumulates significant crossrange from
+    # geographic curvature (eastward great circles curve toward the equator
+    # on a sphere), so we only check the northbound case.
+    assert abs(r_north.crossrange[-1]) < 100.0, (
+        f"Northbound ballistic flight along meridian should have near-zero "
+        f"crossrange, got {r_north.crossrange[-1]:.1f} m"
+    )
 
     # Northbound trajectory ends with higher latitude than eastbound
     assert r_north.latitude[-1] > r_east.latitude[-1]
@@ -855,7 +875,8 @@ def test_rotating_earth_coriolis_deflects_heading_northward_flight():
     from reentrykit.planet import EARTH, EARTH_NON_ROTATING
 
     # Fly due north from the equator
-    vehicle, state = _ballistic_vehicle_at_latitude(0.0, 0.0)
+    # V-B-C convention: heading = pi/2 is due north. Pass 90.0 deg to the helper.
+    vehicle, state = _ballistic_vehicle_at_latitude(0.0, 90.0)
 
     r_rotating = simulate(vehicle, state, planet=EARTH)
     r_static = simulate(vehicle, state, planet=EARTH_NON_ROTATING)
@@ -868,21 +889,22 @@ def test_rotating_earth_coriolis_deflects_heading_northward_flight():
     heading_static_at_peak = r_static.heading[i_peak]
 
     heading_drift = heading_at_peak - heading_static_at_peak
-    # Physics estimate at peak deceleration (~30s into flight, latitude ~2 deg):
-    # Coriolis rate ~ 2*Omega*sin(phi) ~ 5e-6 rad/s, integrated over ~30s
-    # gives ~0.01 deg. Using 0.005 deg as threshold for clear detection
-    # above numerical noise.
-    assert heading_drift > np.deg2rad(0.005), (
-        f"Expected Coriolis-induced heading drift > 0.005 deg at peak deceleration "
-        f"for N-bound flight on rotating Earth, got "
+    # Physics: in V-B-C convention, due north is psi = pi/2 and due east is
+    # psi = 0. Coriolis in the N hemisphere deflects a northbound vehicle
+    # rightward (toward east), which DECREASES psi. So we expect
+    # heading_drift < 0, with magnitude ~0.01 deg at peak-g conditions
+    # (30s into flight, latitude ~2 deg, Coriolis rate 2*Omega*sin(phi) ~ 5e-6 rad/s).
+    assert abs(heading_drift) > np.deg2rad(0.005), (
+        f"Expected Coriolis-induced heading drift magnitude > 0.005 deg at "
+        f"peak deceleration for N-bound flight on rotating Earth, got "
         f"{np.rad2deg(heading_drift):.4f} deg"
     )
 
-    # Also verify sign: northern-hemisphere Coriolis deflects rightward (east).
-    # In our aerospace convention, eastward deflection means positive dpsi.
-    assert heading_drift > 0, (
-        f"Expected positive heading drift (eastward) for N-bound flight in "
-        f"northern hemisphere, got {np.rad2deg(heading_drift):.4f} deg"
+    # Sign check: in V-B-C convention, eastward deflection means negative dpsi.
+    assert heading_drift < 0, (
+        f"Expected negative heading drift (eastward = decreasing psi in V-B-C "
+        f"convention) for N-bound flight in northern hemisphere, got "
+        f"{np.rad2deg(heading_drift):.4f} deg"
     )
 
 

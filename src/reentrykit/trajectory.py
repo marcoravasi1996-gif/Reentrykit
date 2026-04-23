@@ -112,11 +112,20 @@ class Vehicle(NamedTuple):
 class InitialState(NamedTuple):
     """Initial conditions at the entry interface.
 
-    Heading convention: psi is measured from local north, clockwise.
-    psi = 0     -> heading due north
-    psi = pi/2  -> heading due east
-    psi = pi    -> heading due south
-    psi = 3pi/2 -> heading due west
+    Heading convention: psi is measured from the local parallel of
+    latitude (east) to the horizontal projection of velocity, positive
+    counterclockwise (toward north). This follows Vinh, Busemann, and
+    Culp (1980), "Hypersonic and Planetary Entry Flight Mechanics,"
+    §2-5.
+
+        psi = 0      -> heading due east
+        psi = pi/2   -> heading due north
+        psi = pi     -> heading due west
+        psi = 3pi/2  -> heading due south
+
+    Bank angle sigma (on the Vehicle) also follows V-B-C: positive CCW
+    (opposite of aerospace standard). Users providing bank schedules
+    from aerospace sources must negate them at input.
     """
 
     altitude: float                # [m]
@@ -130,9 +139,12 @@ class InitialState(NamedTuple):
 class TrajectoryResult(NamedTuple):
     """Time history of the trajectory and derived aerodynamic quantities.
 
-    Position is reported as latitude/longitude (the simulation's native state
-    variables) plus convenience downrange/crossrange arrays computed as
-    great-circle distances from the entry point.
+    Position is reported as latitude/longitude (the simulation's native
+    state variables) plus convenience downrange/crossrange arrays
+    computed as great-circle distances from the entry point.
+
+    Heading follows Vinh-Busemann-Culp convention: psi = 0 is east,
+    psi = pi/2 is north, psi positive counterclockwise.
     """
 
     time: np.ndarray                 # [s]
@@ -156,22 +168,32 @@ def _derivatives(
     planet: PlanetModel,
 ) -> list[float]:
     """Equations of motion for 3-DOF point-mass flight with bank angle,
-    atmosphere-relative velocity in the Earth-fixed rotating frame.
+    atmosphere-relative velocity in the planet-fixed rotating frame.
+
+    Follows Vinh, Busemann, and Culp (1980), "Hypersonic and Planetary
+    Entry Flight Mechanics," §2-5, equations (2-44) through (2-49).
+    Conventions match V-B-C exactly.
 
     State vector: [V, gamma, psi, h, phi, theta]
         V     : atmosphere-relative velocity magnitude [m/s]
         gamma : flight-path angle [rad], positive above horizontal
-        psi   : heading from north [rad], clockwise (pi/2 = east)
+        psi   : heading [rad], measured from local parallel of latitude
+                (east) to the horizontal projection of V. Positive when
+                rotating counterclockwise (from east toward north).
+                So psi = 0 is due east, psi = pi/2 is due north,
+                psi = pi is due west.
         h     : altitude above mean sea level [m]
         phi   : latitude [rad], positive north
         theta : longitude [rad], positive east
 
-    The equations include Coriolis and centrifugal terms from the planet's
-    rotation rate Omega. When Omega = 0 (as in EARTH_NON_ROTATING), all
-    rotation-related terms vanish and the equations reduce to the
-    non-rotating formulation with lat/lon coordinates.
+    Bank angle sigma: positive when rotating counterclockwise (V-B-C
+    convention). This is opposite to standard aerospace convention;
+    users supplying sigma from aerospace literature (e.g., Apollo
+    bank schedules) must negate it at input.
 
-    References: Vinh, Busemann, and Culp (1980), Section 3.5.
+    When Omega = 0 (as in EARTH_NON_ROTATING), all rotation-related
+    terms vanish and the equations reduce to the non-rotating
+    formulation.
     """
     velocity, flight_path_angle, heading, altitude, latitude, _longitude = state
 
@@ -187,10 +209,10 @@ def _derivatives(
     cd = vehicle.drag_coefficient
     cd_value = cd(mach) if callable(cd) else cd
 
-    # Drag acceleration
+    # Drag acceleration (magnitude, positive along -V direction)
     drag_accel = 0.5 * density * velocity**2 * cd_value * vehicle.reference_area / vehicle.mass
 
-    # Lift and bank angle
+    # Lift and bank angle (V-B-C sigma convention: positive CCW)
     ld = vehicle.lift_to_drag_ratio
     ld_value = ld(time) if callable(ld) else ld
     sigma = vehicle.bank_angle
@@ -198,15 +220,13 @@ def _derivatives(
 
     cos_sigma = np.cos(sigma_value)
     sin_sigma = np.sin(sigma_value)
-    vertical_lift_accel = drag_accel * ld_value * cos_sigma
-    lateral_lift_accel = drag_accel * ld_value * sin_sigma
 
     # Geometry and planet properties
     r = planet.radius + altitude
     g = planet.gravity(altitude)
     omega = planet.rotation_rate
 
-    # Trig values (computed once)
+    # Pre-compute trig values
     sin_gamma = np.sin(flight_path_angle)
     cos_gamma = np.cos(flight_path_angle)
     sin_psi = np.sin(heading)
@@ -214,61 +234,51 @@ def _derivatives(
     sin_phi = np.sin(latitude)
     cos_phi = np.cos(latitude)
 
-    # Guard gamma singularity at poles (gamma = +/- 90 deg; never happens for reentry)
+    # Guard cos(gamma) against zero (vertical flight singularity)
     cos_gamma_safe = np.sign(cos_gamma) * max(abs(cos_gamma), _COS_GAMMA_FLOOR)
 
-    # --- Rotation-related terms (all vanish when omega = 0) ---
+    # --- V-B-C Equations (2-44) through (2-49), atmosphere-relative velocity ---
 
-    # Centrifugal in velocity equation
-    centrifugal_V = omega**2 * r * cos_phi * (
-        sin_gamma * cos_phi - cos_gamma * sin_phi * sin_psi
+    # (2-44) dV/dt
+    dV_dt = (
+        -drag_accel
+        - g * sin_gamma
+        + omega**2 * r * cos_phi * (
+            sin_gamma * cos_phi
+            - cos_gamma * sin_phi * sin_psi
+        )
     )
 
-    # Coriolis + centrifugal in flight-path angle
-    coriolis_gamma = 2.0 * omega * cos_phi * cos_psi
-    centrifugal_gamma = (omega**2 * r * cos_phi / velocity) * (
-        cos_gamma * cos_phi + sin_gamma * sin_phi * sin_psi
-    )
-
-    # Coriolis + centrifugal in heading.
-    # Northern hemisphere: northbound flight deflects eastward (dpsi/dt > 0).
-    # The Coriolis axis-aligned term is +2*Omega*sin(phi), rotating heading clockwise.
-    coriolis_psi = 2.0 * omega * (
-        np.tan(flight_path_angle) * cos_phi * sin_psi + sin_phi
-    )
-    centrifugal_psi = -(
-        omega**2 * r * sin_phi * cos_phi * cos_psi
-    ) / (velocity * cos_gamma_safe)
-
-    # Non-rotation geographic-curvature term in heading.
-    # For a great circle on a sphere, heading evolves as
-    # dpsi/dt = (V cos gamma / r) * tan(phi) * sin(psi)
-    # This arises from the convergence of meridians — not from rotation.
-    geographic_psi = velocity * cos_gamma * sin_psi * np.tan(latitude) / r
-
-    # --- Equations of motion (atmosphere-relative velocity, rotating frame) ---
-
-    dV_dt = -drag_accel - g * sin_gamma + centrifugal_V
-
+    # (2-45) dgamma/dt
     dgamma_dt = (
-        vertical_lift_accel / velocity
+        (drag_accel * ld_value * cos_sigma) / velocity
         - (g / velocity - velocity / r) * cos_gamma
-        + coriolis_gamma
-        + centrifugal_gamma
+        + 2.0 * omega * cos_phi * cos_psi
+        + (omega**2 * r * cos_phi / velocity) * (
+            cos_gamma * cos_phi
+            + sin_gamma * sin_phi * sin_psi
+        )
     )
 
+    # (2-46) dpsi/dt
     dpsi_dt = (
-        lateral_lift_accel / (velocity * cos_gamma_safe)
-        + geographic_psi
-        + coriolis_psi
-        + centrifugal_psi
+        (drag_accel * ld_value * sin_sigma) / (velocity * cos_gamma_safe)
+        - velocity * cos_gamma * cos_psi * np.tan(latitude) / r
+        + 2.0 * omega * (
+            np.tan(flight_path_angle) * cos_phi * sin_psi
+            - sin_phi
+        )
+        - omega**2 * r * sin_phi * cos_phi * cos_psi / (velocity * cos_gamma_safe)
     )
 
+    # (2-47) dh/dt (altitude)
     dh_dt = velocity * sin_gamma
 
-    # Lat/lon kinematics (no rotation terms — rotation is already in the frame)
-    dphi_dt = velocity * cos_gamma * cos_psi / r
-    dtheta_dt = velocity * cos_gamma * sin_psi / (r * cos_phi)
+    # (2-48) dphi/dt (latitude)
+    dphi_dt = velocity * cos_gamma * sin_psi / r
+
+    # (2-49) dtheta/dt (longitude)
+    dtheta_dt = velocity * cos_gamma * cos_psi / (r * cos_phi)
 
     return [dV_dt, dgamma_dt, dpsi_dt, dh_dt, dphi_dt, dtheta_dt]
 
@@ -309,7 +319,12 @@ def _compute_downrange_crossrange(
     # Project great-circle distance onto heading direction:
     # downrange = d * cos(bearing - heading)
     # crossrange = d * sin(bearing - heading) [positive = right of heading]
-    angle_offset = bearing_from_entry - entry_heading
+    # Convert V-B-C entry_heading (from east, CCW) to standard navigation
+    # bearing (from north, CW) before taking the difference. The spherical-
+    # trig bearing computation above is in the navigation convention
+    # (bearing from north, clockwise), independent of our ψ convention.
+    entry_bearing_from_north = np.pi / 2.0 - entry_heading
+    angle_offset = bearing_from_entry - entry_bearing_from_north
     downrange = great_circle_distance * np.cos(angle_offset)
     crossrange = great_circle_distance * np.sin(angle_offset)
 
