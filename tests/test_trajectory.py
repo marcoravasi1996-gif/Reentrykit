@@ -48,7 +48,7 @@ def nominal_entry_state():
 def test_rejects_altitude_above_atmosphere(reference_vehicle):
     """Initial altitude above the extended atmosphere range is rejected."""
     bad_state = InitialState(
-        altitude=300_000.0,  # above the 200 km extended ceiling
+        altitude=600_000.0,  # above the 500 km extended ceiling
         velocity=7500.0,
         flight_path_angle=np.deg2rad(-5.0),
     )

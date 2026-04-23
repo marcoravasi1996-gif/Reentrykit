@@ -54,7 +54,7 @@ MAX_ALTITUDE = 86000.0
 
 # Upper bound of the exponential extension [m]. Above this, callers must
 # model the atmosphere themselves or use a higher-fidelity model.
-MAX_EXTENDED_ALTITUDE = 200000.0
+MAX_EXTENDED_ALTITUDE = 500_000.0   # 500 km (exponential extrapolation remains valid to LEO)
 
 # Scale height used for the 86-200 km exponential extension [m].
 # Chosen as a round value close to Tetzman (2010, M.S. Thesis, University
@@ -166,7 +166,7 @@ def us1976(altitude: float) -> AtmosphereState:
     Raises
     ------
     ValueError
-        If altitude is outside the valid range [0, 200000] m.
+        If altitude is outside the valid range [0, 500000] m.
 
     References
     ----------

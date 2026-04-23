@@ -100,7 +100,7 @@ def test_extension_valid_at_200km_upper_bound():
 def test_extension_rejects_above_extended_ceiling():
     """us1976 rejects altitudes above 200 km."""
     with pytest.raises(ValueError, match="outside the valid range"):
-        us1976(300_000.0)
+        us1976(600_000.0)
 
 
 def test_extension_density_much_lower_than_at_ceiling():
