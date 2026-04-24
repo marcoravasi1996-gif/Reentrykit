@@ -22,10 +22,6 @@ from reentrykit.planet import EARTH_NON_ROTATING
 
 def test_sutton_graves_known_value():
     """Hand-computed Sutton-Graves value at a representative operating point."""
-    # At 60 km altitude, ~rho = 3.1e-4 kg/m^3, V = 7000 m/s, R_N = 0.5 m
-    # q = 1.7415e-4 * sqrt(3.1e-4 / 0.5) * 7000^3
-    # q = 1.7415e-4 * 0.02490 * 3.43e11
-    # q ~ 1.486e6 W/m^2  (about 149 W/cm^2)
     rho = 3.1e-4
     V = 7000.0
     R_N = 0.5
@@ -34,24 +30,21 @@ def test_sutton_graves_known_value():
 
     expected = 1.7415e-4 * np.sqrt(rho / R_N) * V**3
     assert q == pytest.approx(expected, rel=1e-10)
-    assert q > 1.0e6   # order of magnitude sanity check
+    assert q > 1.0e6
     assert q < 2.0e6
 
 
 def test_sutton_graves_zero_velocity_gives_zero_flux():
-    """Zero velocity -> zero heat flux."""
     q = sutton_graves_heat_flux(density=1.0, velocity=0.0, nose_radius=1.0)
     assert q == 0.0
 
 
 def test_sutton_graves_zero_density_gives_zero_flux():
-    """Zero density (vacuum) -> zero heat flux."""
     q = sutton_graves_heat_flux(density=0.0, velocity=10_000.0, nose_radius=1.0)
     assert q == 0.0
 
 
 def test_sutton_graves_scales_as_v_cubed():
-    """Doubling velocity should give 8x heat flux."""
     rho = 1e-4
     R_N = 0.3
     q1 = sutton_graves_heat_flux(rho, 5000.0, R_N)
@@ -60,7 +53,6 @@ def test_sutton_graves_scales_as_v_cubed():
 
 
 def test_sutton_graves_scales_as_sqrt_rho():
-    """Quadrupling density should give 2x heat flux."""
     V = 8000.0
     R_N = 0.3
     q1 = sutton_graves_heat_flux(1e-4, V, R_N)
@@ -69,7 +61,6 @@ def test_sutton_graves_scales_as_sqrt_rho():
 
 
 def test_sutton_graves_scales_as_inv_sqrt_nose_radius():
-    """Quadrupling nose radius should give half heat flux."""
     rho = 1e-4
     V = 8000.0
     q1 = sutton_graves_heat_flux(rho, V, 0.25)
@@ -78,7 +69,6 @@ def test_sutton_graves_scales_as_inv_sqrt_nose_radius():
 
 
 def test_sutton_graves_rejects_zero_nose_radius():
-    """Zero or negative nose radius should raise."""
     with pytest.raises(ValueError, match="nose_radius"):
         sutton_graves_heat_flux(density=1e-4, velocity=7000.0, nose_radius=0.0)
     with pytest.raises(ValueError, match="nose_radius"):
@@ -86,13 +76,11 @@ def test_sutton_graves_rejects_zero_nose_radius():
 
 
 def test_sutton_graves_rejects_negative_density():
-    """Negative density should raise."""
     with pytest.raises(ValueError, match="density"):
         sutton_graves_heat_flux(density=-1e-4, velocity=7000.0, nose_radius=0.5)
 
 
 def test_sutton_graves_rejects_negative_velocity():
-    """Negative velocity magnitude should raise."""
     with pytest.raises(ValueError, match="velocity"):
         sutton_graves_heat_flux(density=1e-4, velocity=-7000.0, nose_radius=0.5)
 
@@ -116,7 +104,7 @@ def stardust_trajectory():
         altitude=125_000.0,
         velocity=12_300.0,
         flight_path_angle=np.deg2rad(-8.2),
-        heading=np.deg2rad(15.0),     # V-B-C: ~75 deg aerospace
+        heading=np.deg2rad(15.0),
         latitude=np.deg2rad(41.0),
         longitude=np.deg2rad(-128.0),
     )
@@ -128,7 +116,6 @@ def stardust_trajectory():
 
 
 def test_heating_history_returns_correct_shape(stardust_trajectory):
-    """Output arrays match input trajectory length."""
     result = heating_history(stardust_trajectory, nose_radius=0.2202)
 
     assert isinstance(result, HeatingResult)
@@ -138,34 +125,29 @@ def test_heating_history_returns_correct_shape(stardust_trajectory):
 
 
 def test_heating_history_peak_is_positive(stardust_trajectory):
-    """Peak heat flux must be positive for a real reentry."""
     result = heating_history(stardust_trajectory, nose_radius=0.2202)
     assert result.peak_heat_flux > 0.0
     assert result.total_heat_load > 0.0
 
 
 def test_heating_history_heat_load_is_monotonic(stardust_trajectory):
-    """Integrated heat load must be non-decreasing."""
     result = heating_history(stardust_trajectory, nose_radius=0.2202)
     diffs = np.diff(result.heat_load)
     assert (diffs >= 0.0).all()
 
 
 def test_heating_history_initial_heat_load_is_zero(stardust_trajectory):
-    """At t=0, accumulated heat load should be zero."""
     result = heating_history(stardust_trajectory, nose_radius=0.2202)
     assert result.heat_load[0] == 0.0
 
 
 def test_heating_history_peak_time_occurs_within_trajectory(stardust_trajectory):
-    """Peak heating time must be within the trajectory's time range."""
     result = heating_history(stardust_trajectory, nose_radius=0.2202)
     assert stardust_trajectory.time[0] <= result.peak_heat_flux_time
     assert result.peak_heat_flux_time <= stardust_trajectory.time[-1]
 
 
 def test_heating_history_rejects_zero_nose_radius(stardust_trajectory):
-    """heating_history should reject zero/negative nose_radius."""
     with pytest.raises(ValueError, match="nose_radius"):
         heating_history(stardust_trajectory, nose_radius=0.0)
 
@@ -176,19 +158,16 @@ def test_heating_history_rejects_zero_nose_radius(stardust_trajectory):
 
 
 def test_stardust_peak_heat_flux_order_of_magnitude(stardust_trajectory):
-    """Stardust peak convective heat flux should be order 10 MW/m^2.
+    """Stardust peak convective heat flux should be order 5-15 MW/m².
 
-    The Sutton-Graves correlation gives convective heating only. Stardust's
-    published total peak heat flux (~1200 W/cm^2 = 12 MW/m^2) includes
-    substantial radiative heating at V = 12.3 km/s.
-    
-    This test verifies our convective-only result is in the correct order
-    of magnitude (5-15 MW/m^2). Precise validation against published
-    convective-only values requires radiative heating to be added (Tier 2).
+    Sutton-Graves gives convective heating only. Stardust's published total
+    peak heat flux (~1200 W/cm² = 12 MW/m²) includes substantial radiative
+    heating at V = 12.3 km/s. Our convective-only result should be lower
+    but within the correct order of magnitude.
     """
     result = heating_history(stardust_trajectory, nose_radius=0.2202)
 
     assert 5e6 < result.peak_heat_flux < 1.5e7, (
-        f"Stardust peak convective heat flux {result.peak_heat_flux:.2e} W/m^2 "
-        f"outside expected order of magnitude range (5e6 to 1.5e7 W/m^2)"
+        f"Stardust peak convective heat flux {result.peak_heat_flux:.2e} W/m² "
+        f"outside expected order-of-magnitude range (5e6 to 1.5e7 W/m²)"
     )

@@ -12,14 +12,21 @@ where:
     V     = freestream velocity [m/s]
 
 This is a first-order analytical correlation for convective heating at the
-stagnation point of a blunt body. It does not account for radiative heating
-(significant above ~10 km/s), boundary-layer transition, or heating at
-locations other than the stagnation point.
+stagnation point of a blunt body. Typical accuracy is ±10-15% vs CFD.
 
 Reference:
     Sutton, K., and Graves, R. A. (1971). "A General Stagnation-Point
     Convective-Heating Equation for Arbitrary Gas Mixtures."
     NASA Technical Report R-376.
+
+Note
+----
+This module currently covers **convective heating only**. Radiative heating
+(significant above ~10 km/s via nitrogen and CO gas emission) is NOT modeled.
+For missions like Apollo (10.8 km/s) and Stardust (12.3 km/s), radiative
+heating contributes 20-40% of the total peak heat flux. Adding a calibrated
+radiative correlation (e.g., Tauber-Sutton 1991) requires primary-source
+verification of the coefficients and is deferred to future work.
 """
 from __future__ import annotations
 
@@ -36,7 +43,7 @@ SUTTON_GRAVES_K_EARTH = 1.7415e-4  # [W · s^3 · kg^-0.5 · m^-1.5]
 
 
 class HeatingResult(NamedTuple):
-    """Stagnation-point heating history for a trajectory.
+    """Stagnation-point convective heating history for a trajectory.
 
     Attributes
     ----------
@@ -45,8 +52,7 @@ class HeatingResult(NamedTuple):
     heat_flux : np.ndarray
         Stagnation-point convective heat flux [W/m²] at each time step.
     heat_load : np.ndarray
-        Integrated heat load [J/m²] at each time step. heat_load[-1] is
-        the total heat load delivered to the stagnation point.
+        Integrated heat load [J/m²] at each time step.
     peak_heat_flux : float
         Maximum stagnation-point heat flux over the trajectory [W/m²].
     peak_heat_flux_time : float
@@ -113,7 +119,7 @@ def heating_history(
     nose_radius: float,
     constant: float = SUTTON_GRAVES_K_EARTH,
 ) -> HeatingResult:
-    """Compute stagnation-point heating history from a trajectory result.
+    """Compute stagnation-point convective heating history from a trajectory.
 
     Parameters
     ----------
