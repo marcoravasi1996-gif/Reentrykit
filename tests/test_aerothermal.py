@@ -10,6 +10,7 @@ from reentrykit.aerothermal import (
     HeatingResult,
     heating_history,
     sutton_graves_heat_flux,
+    tauber_sutton_heat_flux,
 )
 from reentrykit.trajectory import InitialState, Vehicle, simulate
 from reentrykit.planet import EARTH_NON_ROTATING
@@ -171,3 +172,86 @@ def test_stardust_peak_heat_flux_order_of_magnitude(stardust_trajectory):
         f"Stardust peak convective heat flux {result.peak_heat_flux:.2e} W/m² "
         f"outside expected order-of-magnitude range (5e6 to 1.5e7 W/m²)"
     )
+
+# ---------------------------------------------------------------------------
+# Tauber-Sutton radiative heating tests
+# ---------------------------------------------------------------------------
+
+
+def test_tauber_sutton_below_v_threshold_gives_zero():
+    """Below 10,000 m/s, radiation returns 0 (outside validity)."""
+    q = tauber_sutton_heat_flux(density=2e-4, velocity=8_000.0, nose_radius=0.5)
+    assert q == 0.0
+
+
+def test_tauber_sutton_above_v_threshold_gives_zero():
+    """Above 16,000 m/s, radiation returns 0 (outside validity)."""
+    q = tauber_sutton_heat_flux(density=2e-4, velocity=18_000.0, nose_radius=0.5)
+    assert q == 0.0
+
+
+def test_tauber_sutton_below_rho_threshold_gives_zero():
+    """Below density threshold, radiation returns 0."""
+    q = tauber_sutton_heat_flux(density=1e-5, velocity=12_000.0, nose_radius=0.5)
+    assert q == 0.0
+
+
+def test_tauber_sutton_above_rho_threshold_gives_zero():
+    """Above density threshold, radiation returns 0."""
+    q = tauber_sutton_heat_flux(density=1e-3, velocity=12_000.0, nose_radius=0.5)
+    assert q == 0.0
+
+
+def test_tauber_sutton_in_range_is_positive():
+    """Within validity range, radiation flux > 0."""
+    q = tauber_sutton_heat_flux(density=2e-4, velocity=12_000.0, nose_radius=0.5)
+    assert q > 0.0
+
+
+def test_tauber_sutton_increases_with_velocity():
+    """Radiation flux increases monotonically with V in valid range."""
+    rho = 2e-4
+    R_N = 0.5
+    velocities = [10_500.0, 11_500.0, 12_500.0, 13_500.0, 14_500.0]
+    fluxes = [tauber_sutton_heat_flux(rho, v, R_N) for v in velocities]
+    diffs = np.diff(fluxes)
+    assert (diffs > 0).all()
+
+
+def test_tauber_sutton_rejects_invalid_inputs():
+    """Negative density, negative velocity, non-positive R_N raise."""
+    with pytest.raises(ValueError, match="nose_radius"):
+        tauber_sutton_heat_flux(density=2e-4, velocity=12_000.0, nose_radius=0.0)
+    with pytest.raises(ValueError, match="density"):
+        tauber_sutton_heat_flux(density=-2e-4, velocity=12_000.0, nose_radius=0.5)
+    with pytest.raises(ValueError, match="velocity"):
+        tauber_sutton_heat_flux(density=2e-4, velocity=-12_000.0, nose_radius=0.5)
+
+
+def test_tauber_sutton_rejects_excessive_nose_radius():
+    """R_N > 3 m exceeds source validity, raises."""
+    with pytest.raises(ValueError, match="exceeds Tauber-Sutton"):
+        tauber_sutton_heat_flux(density=2e-4, velocity=12_000.0, nose_radius=4.0)
+
+
+# ---------------------------------------------------------------------------
+# Combined heating history tests
+# ---------------------------------------------------------------------------
+
+
+def test_heating_history_returns_total_flux(stardust_trajectory):
+    """heating_history returns total = convective + radiative."""
+    result = heating_history(stardust_trajectory, nose_radius=0.2202)
+    np.testing.assert_allclose(
+        result.total_flux,
+        result.convective_flux + result.radiative_flux,
+        rtol=1e-10,
+    )
+
+
+def test_heating_history_radiative_significant_for_stardust(stardust_trajectory):
+    """For Stardust at 12.3 km/s entry, radiation is a meaningful fraction
+    of total heating."""
+    result = heating_history(stardust_trajectory, nose_radius=0.2202)
+    # Expect peak radiative > 5% of peak convective
+    assert result.peak_radiative_flux > 0.05 * result.peak_convective_flux

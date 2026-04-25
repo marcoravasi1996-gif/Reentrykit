@@ -121,6 +121,17 @@ AVCOAT = TPSMaterial(
     reference="Apollo heatshield design documents",
 )
 
+CARBON_PHENOLIC = TPSMaterial(
+    name="Carbon-Phenolic (tape-wrapped, dense)",
+    density=1450.0,
+    thermal_conductivity=0.70,
+    specific_heat=1700.0,
+    max_surface_temperature=3500.0,
+    max_bondline_temperature=523.0,
+    reference="Park (1990) Nonequilibrium Hypersonic Aerothermodynamics; "
+    "Pioneer-Venus / Galileo CP heatshield literature",
+)
+
 
 # =========================================================================
 # Transient heat conduction solver
