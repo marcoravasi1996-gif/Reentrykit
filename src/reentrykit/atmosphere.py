@@ -18,11 +18,18 @@ formulation (both outside the scope of this module).
 For convenience in reentry trajectory analysis — where vehicles may enter
 above 86 km but only briefly pass through near-vacuum before reaching the
 validated regime — this module provides a simple exponential extension
-from 86 km to 200 km. The extension uses a fixed scale height (7 km)
+from 86 km to 500 km. The extension uses a fixed scale height (7 km)
 anchored at the US1976 density at 86 km, continuous in value but not in
 derivative. Temperature and speed of sound in the extension are held at
-their 86 km values. This is a calibrated approximation for preliminary
-design, not a rigorous atmospheric model.
+their 86 km values.
+
+This is a numerical convenience for trajectory integration, not a
+physically valid atmospheric model above ~120 km. Above 100-120 km the
+real atmosphere undergoes diffusive separation with composition varying
+strongly with altitude and solar activity (atomic oxygen dominant by
+~150 km). For applications requiring physically meaningful upper-
+atmosphere data, use NRLMSISE-00 or the full US1976 upper-atmosphere
+formulation (both outside the scope of this module).
 """
 from __future__ import annotations
 
@@ -54,8 +61,7 @@ MAX_ALTITUDE = 86000.0
 
 # Upper bound of the exponential extension [m]. Above this, callers must
 # model the atmosphere themselves or use a higher-fidelity model.
-MAX_EXTENDED_ALTITUDE = 500_000.0   # 500 km (exponential extrapolation remains valid to LEO)
-
+MAX_EXTENDED_ALTITUDE = 500_000.0   # 500 km, numerical extension only (not physically valid above ~120 km)
 # Scale height used for the 86-200 km exponential extension [m].
 # Chosen as a round value close to Tetzman (2010, M.S. Thesis, University
 # of Minnesota) H = 6.93 km, which itself is an altitude-averaged value
@@ -145,17 +151,18 @@ def us1976(altitude: float) -> AtmosphereState:
     Below 86 km, returns US1976-standard values (temperature, pressure,
     density, speed of sound) from the layered hydrostatic model.
 
-    Between 86 km and 200 km, returns an exponential extension anchored at
+    Between 86 km and 500 km, returns an exponential extension anchored at
     the 86 km US1976 state: density decays as exp(-(h - 86 km) / H) with
     H = 7 km, pressure decays in the same ratio, while temperature and
-    speed of sound are held at their 86 km values. This is a calibrated
-    approximation for preliminary-design use only — see module docstring.
+    speed of sound are held at their 86 km values. This is a numerical
+    convenience for trajectory integration; it is not a physically valid
+    atmospheric model above ~120 km — see module docstring.
 
     Parameters
     ----------
     altitude : float
         Geopotential altitude above mean sea level [m]. Must be in the range
-        [0, 200000].
+        [0, 500000].
 
     Returns
     -------

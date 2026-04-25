@@ -88,17 +88,26 @@ def test_extension_temperature_frozen():
     assert us1976(100_000.0).temperature == t_86
     assert us1976(150_000.0).temperature == t_86
     assert us1976(200_000.0).temperature == t_86
+    assert us1976(400_000.0).temperature == t_86   # well into the extension
 
 
-def test_extension_valid_at_200km_upper_bound():
-    """us1976 accepts altitudes up to the extended ceiling."""
+def test_extension_valid_at_high_altitude():
+    """us1976 accepts altitudes well into the extension region."""
     state = us1976(200_000.0)
     assert state.density > 0.0
     assert state.pressure > 0.0
 
 
+def test_extension_valid_at_extended_ceiling():
+    """us1976 accepts the maximum extended altitude (500 km)."""
+    state = us1976(500_000.0)
+    assert state.density > 0.0
+    assert state.pressure > 0.0
+    assert state.density < 1e-10   # near-vacuum at this altitude
+
+
 def test_extension_rejects_above_extended_ceiling():
-    """us1976 rejects altitudes above 200 km."""
+    """us1976 rejects altitudes above 500 km extended ceiling."""
     with pytest.raises(ValueError, match="outside the valid range"):
         us1976(600_000.0)
 

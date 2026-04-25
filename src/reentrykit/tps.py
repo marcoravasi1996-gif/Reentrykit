@@ -6,17 +6,21 @@ Treats TPS material as a simple insulating slab — no ablation, no char
 layer, no temperature-dependent properties. Valid for first-order sizing
 estimates and for reusable insulator materials (e.g., Shuttle tiles).
 
-For ablative materials (PICA, AVCOAT), Level 1 sizing typically
-**overestimates** required thickness because:
+For ablative materials (PICA, AVCOAT, carbon-phenolic), Level 1 sizing
+typically **underestimates** required thickness because:
 
-1. Surface reradiation caps the temperature at radiative equilibrium
-    instead of the material's actual ablation temperature — so more
-    heat conducts inward than in a real pyrolyzing material.
-2. Surface recession (material loss to ablation) is not modeled —
-    a real ablator reduces its own thickness while absorbing heat.
+1. Surface recession (material loss to ablation) is not modeled — a real
+   ablator reduces its own thickness during flight as the surface chars
+   and pyrolyzes, requiring additional sacrificial material.
+2. The grey-body reradiation cap on surface temperature is a numerical
+   convenience; real ablators reach a self-regulating ablation temperature
+   below the radiative-equilibrium value, with mass loss carrying away
+   energy that our model treats as conducted into the substrate.
 
-A ~20-30% margin between Level 1 predictions and actual flown ablator
-thicknesses is typical.
+Empirically: Level 1 underpredicts actual flown ablator thickness by
+~30-50%. The Level 1 result represents the minimum thermal-insulation
+thickness; real flown thicknesses include this insulation requirement
+plus a sacrificial recession allowance plus design margin.
 
 The solver uses an explicit finite-difference scheme:
 
@@ -253,12 +257,13 @@ def transient_bondline_temperature(
         # rho*c*(dx/2) * dT/dt = k*(T[1]-T[0])/dx + q_in - sigma*eps*(T^4 - T_amb^4)
         # Solved explicitly with the half-volume capacitance.
         #
-        # The radiation term is clipped to prevent numerical runaway during
-        # the first few time steps before the solution stabilizes. This
-        # is physically equivalent to limiting the emissive power to the
-        # incoming flux (energy can't radiate more than it receives in
-        # any instant without a prior accumulation).
-        T_surf_safe = min(T[0], 4000.0)   # clip to prevent T^4 overflow
+        # Cap T_surface at 4000 K when computing the T^4 reradiation term
+        # to prevent float64 overflow. This is a numerical safety net; the
+        # stable time-step computation above already limits dT/step so that
+        # T_surface should not exceed the physical radiative-equilibrium
+        # temperature (~3500 K for our typical heating ranges). If this cap
+        # ever activates in practice, the time step is too large.
+        T_surf_safe = min(T[0], 4000.0)
         q_reradiated = (
             _STEFAN_BOLTZMANN * surface_emissivity *
             (T_surf_safe**4 - initial_temperature**4)

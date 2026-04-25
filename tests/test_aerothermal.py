@@ -22,12 +22,18 @@ from reentrykit.planet import EARTH_NON_ROTATING
 
 
 def test_sutton_graves_known_value():
-    """Hand-computed Sutton-Graves value at a representative operating point."""
+    """Sutton-Graves at known conditions matches hand calculation."""
     rho = 3.1e-4
     V = 7000.0
     R_N = 0.5
-
-    q = sutton_graves_heat_flux(rho, V, R_N)
+    
+    # Hand calculation:
+    # q = 1.7415e-4 * sqrt(3.1e-4 / 0.5) * 7000^3
+    # q = 1.7415e-4 * 0.02490 * 3.43e11
+    # q = 1.486e6 W/m^2
+    expected_hand = 1.486e6  # W/m^2  
+    q = sutton_graves_heat_flux(rho, V, R_N) 
+    assert q == pytest.approx(expected_hand, rel=0.01)
 
     expected = 1.7415e-4 * np.sqrt(rho / R_N) * V**3
     assert q == pytest.approx(expected, rel=1e-10)
@@ -255,3 +261,68 @@ def test_heating_history_radiative_significant_for_stardust(stardust_trajectory)
     result = heating_history(stardust_trajectory, nose_radius=0.2202)
     # Expect peak radiative > 5% of peak convective
     assert result.peak_radiative_flux > 0.05 * result.peak_convective_flux
+
+def test_heating_history_apollo_class_returns_convective_only():
+    """For nose radii > 3 m (Apollo CM, R_N=4.66 m), heating_history returns
+    convective only without error; radiative_flux is zero everywhere."""
+    apollo_vehicle = Vehicle.from_mass_area_cd(
+        mass=5425.0,
+        reference_area=12.0,
+        drag_coefficient=1.2,
+        lift_to_drag_ratio=0.0,
+        nose_radius=4.66,
+    )
+    state = InitialState(
+        altitude=121_920.0,
+        velocity=10_742.0,
+        flight_path_angle=np.deg2rad(-7.14),
+        heading=np.deg2rad(22.8),
+        latitude=np.deg2rad(21.9),
+        longitude=np.deg2rad(152.2),
+    )
+    trajectory = simulate(apollo_vehicle, state,
+                          planet=EARTH_NON_ROTATING,
+                          max_time=500.0, dt_output=0.5)
+
+    # This should NOT raise (was previously a bug for Apollo)
+    heat = heating_history(trajectory, nose_radius=4.66)
+
+    # Convective should be positive
+    assert heat.peak_convective_flux > 0.0
+
+    # Radiative should be zero everywhere (R_N > 3 m skip)
+    assert (heat.radiative_flux == 0.0).all()
+    assert heat.peak_radiative_flux == 0.0
+    assert heat.total_radiative_load == 0.0
+
+
+def test_heating_history_skip_radiative_flag():
+    """skip_radiative=True forces convective-only for any R_N."""
+    vehicle = Vehicle.from_mass_area_cd(
+        mass=45.8,
+        reference_area=np.pi * (0.811 / 2) ** 2,
+        drag_coefficient=1.0,
+        lift_to_drag_ratio=0.0,
+        nose_radius=0.2202,
+    )
+    state = InitialState(
+        altitude=125_000.0, velocity=12_300.0,
+        flight_path_angle=np.deg2rad(-8.2),
+        heading=np.deg2rad(15.0),
+        latitude=np.deg2rad(41.0), longitude=np.deg2rad(-128.0),
+    )
+    trajectory = simulate(vehicle, state, planet=EARTH_NON_ROTATING,
+                          max_time=500.0, dt_output=0.1)
+
+    heat_no_skip = heating_history(trajectory, nose_radius=0.2202,
+                                    skip_radiative=False)
+    heat_skip = heating_history(trajectory, nose_radius=0.2202,
+                                skip_radiative=True)
+
+    # With Stardust (R_N < 3 m), no-skip has nonzero radiative
+    assert heat_no_skip.peak_radiative_flux > 0.0
+    # Skip flag forces zero
+    assert heat_skip.peak_radiative_flux == 0.0
+    # Convective is the same in both
+    np.testing.assert_allclose(heat_no_skip.convective_flux,
+                                heat_skip.convective_flux, rtol=1e-12)

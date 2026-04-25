@@ -9,6 +9,7 @@ from reentrykit.aerothermal import HeatingResult, heating_history
 from reentrykit.planet import EARTH_NON_ROTATING
 from reentrykit.tps import (
     AVCOAT,
+    CARBON_PHENOLIC,
     PICA,
     TPSMaterial,
     TPSSizingResult,
@@ -183,3 +184,107 @@ def test_size_tps_rejects_too_thin_maximum(stardust_heating):
     with pytest.raises(ValueError, match="Maximum thickness"):
         size_tps(stardust_heating, PICA,
                 thickness_min=0.001, thickness_max=0.002)
+        
+def test_carbon_phenolic_is_denser_than_avcoat():
+    """Carbon-phenolic should be denser than AVCOAT (legacy heavy ablator hierarchy)."""
+    assert CARBON_PHENOLIC.density > AVCOAT.density
+
+
+def test_carbon_phenolic_in_solver():
+    """The solver runs cleanly with carbon-phenolic material."""
+    t = np.linspace(0, 100, 201)
+    q = np.where((t > 20) & (t < 50), 2e6, 0.0)
+
+    _, T_surf, T_bl = transient_bondline_temperature(
+        thickness=0.030, heat_flux_time=t, heat_flux=q,
+        material=CARBON_PHENOLIC,
+        initial_temperature=293.0, n_nodes=30,
+    )
+
+    assert T_surf.max() > 293.0
+    assert T_bl.max() < CARBON_PHENOLIC.max_bondline_temperature
+
+def test_return_full_field_returns_temperature_field():
+    """return_full_field=True returns spatial T(x,t) instead of surface/bondline."""
+    t = np.linspace(0, 100, 101)
+    q = np.where((t > 20) & (t < 50), 1e6, 0.0)
+
+    n_nodes = 30
+    time, x, T_field = transient_bondline_temperature(
+        thickness=0.030, heat_flux_time=t, heat_flux=q, material=PICA,
+        initial_temperature=293.0, n_nodes=n_nodes,
+        return_full_field=True,
+    )
+
+    # Shape checks
+    assert T_field.shape == (len(time), n_nodes)
+    assert x.shape == (n_nodes,)
+    assert x[0] == 0.0
+    assert x[-1] == pytest.approx(0.030)
+
+    # Front face hotter than back face during heating
+    i_during_heat = int(len(time) * 0.4)  # roughly during heating
+    assert T_field[i_during_heat, 0] > T_field[i_during_heat, -1]
+
+
+def test_return_full_field_consistency_with_default():
+    """T_field[:, 0] equals surface_temp from default mode; T_field[:, -1] equals bondline_temp."""
+    t = np.linspace(0, 100, 201)
+    q = np.where((t > 20) & (t < 50), 2e6, 0.0)
+
+    n_nodes = 40
+    # Default mode
+    time1, T_surf, T_bl = transient_bondline_temperature(
+        thickness=0.050, heat_flux_time=t, heat_flux=q, material=PICA,
+        initial_temperature=293.0, n_nodes=n_nodes,
+        return_full_field=False,
+    )
+
+    # Full-field mode
+    time2, x, T_field = transient_bondline_temperature(
+        thickness=0.050, heat_flux_time=t, heat_flux=q, material=PICA,
+        initial_temperature=293.0, n_nodes=n_nodes,
+        return_full_field=True,
+    )
+
+    np.testing.assert_allclose(time1, time2, rtol=1e-12)
+    np.testing.assert_allclose(T_field[:, 0], T_surf, rtol=1e-12)
+    np.testing.assert_allclose(T_field[:, -1], T_bl, rtol=1e-12)
+
+def test_lower_emissivity_gives_hotter_surface():
+    """Lower surface emissivity reduces reradiation, raising surface temperature."""
+    t = np.linspace(0, 100, 201)
+    q = np.where((t > 20) & (t < 50), 5e6, 0.0)  # high heat flux
+
+    # High emissivity (efficient radiator)
+    _, T_surf_hi, _ = transient_bondline_temperature(
+        thickness=0.030, heat_flux_time=t, heat_flux=q, material=PICA,
+        initial_temperature=293.0, n_nodes=30,
+        surface_emissivity=0.95,
+    )
+
+    # Low emissivity (poor radiator)
+    _, T_surf_lo, _ = transient_bondline_temperature(
+        thickness=0.030, heat_flux_time=t, heat_flux=q, material=PICA,
+        initial_temperature=293.0, n_nodes=30,
+        surface_emissivity=0.30,
+    )
+
+    assert T_surf_lo.max() > T_surf_hi.max()
+
+
+def test_emissivity_outside_valid_range_rejected():
+    """Emissivity outside (0, 1] should raise."""
+    t = np.linspace(0, 10, 11)
+    q = np.zeros_like(t)
+
+    with pytest.raises(ValueError, match="emissivity"):
+        transient_bondline_temperature(
+            thickness=0.01, heat_flux_time=t, heat_flux=q, material=PICA,
+            surface_emissivity=0.0,
+        )
+    with pytest.raises(ValueError, match="emissivity"):
+        transient_bondline_temperature(
+            thickness=0.01, heat_flux_time=t, heat_flux=q, material=PICA,
+            surface_emissivity=1.5,
+        )

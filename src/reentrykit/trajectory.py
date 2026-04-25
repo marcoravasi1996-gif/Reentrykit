@@ -1,15 +1,18 @@
 """3-DOF point-mass reentry trajectory simulator with bank-angle modulation.
 
-Integrates the motion of a reentry vehicle over a non-rotating spherical Earth
-using the Vinh-Busemann-Culp equations of motion.
+Integrates the motion of a reentry vehicle over a planet (rotating or
+non-rotating) using the Vinh-Busemann-Culp equations of motion.
 
-State vector: [V, gamma, psi, h, s, y]
+State vector: [V, gamma, psi, h, phi, theta]
     V      : atmosphere-relative velocity magnitude [m/s]
     gamma  : flight-path angle [rad], positive above horizontal
-    psi    : heading angle [rad], positive = right of downrange axis
+    psi    : heading angle [rad], V-B-C convention (from east, CCW)
     h      : altitude above mean sea level [m]
-    s      : downrange distance from entry point [m]
-    y      : crossrange distance from entry plane [m]
+    phi    : latitude [rad], positive north
+    theta  : longitude [rad], positive east
+
+Downrange and crossrange are computed post-hoc from latitude/longitude
+as great-circle distances projected onto the entry heading.
 
 Lift modulation is specified by two fields on the Vehicle:
     lift_to_drag_ratio : signed L/D, constant or callable(t_sec) -> L/D
@@ -40,8 +43,7 @@ from typing import Callable, NamedTuple, Union
 import numpy as np
 from scipy.integrate import solve_ivp
 
-from reentrykit.atmosphere import MAX_ALTITUDE, MAX_EXTENDED_ALTITUDE, us1976
-from reentrykit.planet import EARTH, EARTH_NON_ROTATING, PlanetModel
+from reentrykit.planet import EARTH_NON_ROTATING, PlanetModel
 
 # Type aliases: constant float or time-varying callable
 LiftToDragSpec = Union[float, Callable[[float], float]]
@@ -52,7 +54,6 @@ BankAngleSpec = Union[float, Callable[[float], float]]
 # The legacy constant G0 is kept as an import for backward compatibility
 # with code that computes Allen-Eggers predictions at sea level.
 G0 = 9.80665              # [m/s^2], standard gravitational acceleration at Earth's surface
-
 # Numerical guards
 _MIN_ALTITUDE = 0.0   # [m], ground impact
 _COS_GAMMA_FLOOR = 1e-4  # prevents division by zero at gamma = +/- 90 deg
@@ -91,8 +92,8 @@ class Vehicle(NamedTuple):
         bank_angle: BankAngleSpec = 0.0,
         nose_radius: float = 0.1,
     ) -> "Vehicle":
-        """Convenience constructor accepting the same arguments as the
-        primary constructor. Preserved for backward compatibility."""
+        """Convenience constructor with mass-first argument order; otherwise
+        identical to the default Vehicle constructor."""
         return cls(
             reference_area=reference_area,
             mass=mass,
@@ -131,7 +132,7 @@ class InitialState(NamedTuple):
     altitude: float                # [m]
     velocity: float                # [m/s], atmosphere-relative at entry
     flight_path_angle: float       # [rad], negative for descent
-    heading: float = 0.0           # [rad], from north clockwise
+    heading: float = 0.0           # [rad], V-B-C convention (from east, CCW)
     latitude: float = 0.0          # [rad], positive north
     longitude: float = 0.0         # [rad], positive east
 
@@ -151,7 +152,7 @@ class TrajectoryResult(NamedTuple):
     altitude: np.ndarray             # [m]
     velocity: np.ndarray             # [m/s]
     flight_path_angle: np.ndarray    # [rad]
-    heading: np.ndarray              # [rad], from north clockwise
+    heading: np.ndarray              # [rad], V-B-C convention (from east, CCW)
     latitude: np.ndarray             # [rad]
     longitude: np.ndarray            # [rad]
     downrange: np.ndarray            # [m], great-circle distance from entry
@@ -339,8 +340,8 @@ def simulate(
 ) -> TrajectoryResult:
     """Integrate the reentry trajectory from entry interface to termination.
 
-    Terminates on ground impact (h = 0) or skip-out above the 200 km
-    extended atmosphere ceiling.
+    Terminates on ground impact (h = 0) or skip-out above the planet's
+    maximum atmosphere altitude.
     """
     if initial_state.altitude < 0.0 or initial_state.altitude > planet.max_atmosphere_altitude:
         raise ValueError(

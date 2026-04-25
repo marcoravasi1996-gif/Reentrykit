@@ -311,9 +311,8 @@ class HeatingResult(NamedTuple):
 
     @property
     def peak_heat_flux_altitude(self) -> float:
-        # Returns NaN: altitude not stored in this NamedTuple. Preserve
-        # backward-compat callers that don't use altitude (most don't).
-        return float("nan")
+        """Altitude at peak total flux (close to peak convective in practice)."""
+        return self.peak_total_flux_altitude
 
     @property
     def total_heat_load(self) -> float:
@@ -334,11 +333,14 @@ def heating_history(
     result: TrajectoryResult,
     nose_radius: float,
     sutton_graves_constant: float = SUTTON_GRAVES_K_EARTH,
+    skip_radiative: bool = False,
 ) -> HeatingResult:
     """Compute full stagnation-point heating history from a trajectory.
 
     Includes convective (Sutton-Graves) and radiative (Tauber-Sutton)
-    components.
+    components. For nose radii outside Tauber-Sutton validity (R_N > 3 m,
+    e.g., Apollo CM at R_N = 4.66 m) the radiative contribution is
+    automatically skipped and only convective heating is returned.
 
     Parameters
     ----------
@@ -348,10 +350,15 @@ def heating_history(
         Effective nose radius [m].
     sutton_graves_constant : float, optional
         Convective heating constant.
+    skip_radiative : bool, optional
+        If True, skip Tauber-Sutton radiative even when R_N is within
+        validity. Default False. Useful for diagnostic comparisons.
 
     Returns
     -------
     HeatingResult
+        With radiative_flux = 0 everywhere if R_N > 3 m or if
+        skip_radiative=True.
     """
     if nose_radius <= 0.0:
         raise ValueError(f"nose_radius must be positive, got {nose_radius}")
@@ -364,47 +371,43 @@ def heating_history(
     )
 
     # --- Radiative (vectorized within validity ranges) ------------------
-    in_v_range = (
-        (result.velocity >= TAUBER_SUTTON_V_MIN)
-        & (result.velocity <= TAUBER_SUTTON_V_MAX)
-    )
-    in_rho_range = (
-        (result.density >= TAUBER_SUTTON_RHO_MIN)
-        & (result.density <= TAUBER_SUTTON_RHO_MAX)
-    )
-    in_range = in_v_range & in_rho_range
-
     q_rad = np.zeros_like(q_conv)
-    if in_range.any():
-        # Compute a element-wise where in-range
-        a_exp = (
-            1.072e6
-            * result.velocity[in_range] ** (-1.88)
-            * result.density[in_range] ** (-0.325)
+
+    if not skip_radiative and nose_radius <= 3.0:
+        in_v_range = (
+            (result.velocity >= TAUBER_SUTTON_V_MIN)
+            & (result.velocity <= TAUBER_SUTTON_V_MAX)
         )
-        if 1.0 <= nose_radius < 2.0:
-            a_exp = np.minimum(a_exp, 0.6)
-        elif 2.0 <= nose_radius <= 3.0:
-            a_exp = np.minimum(a_exp, 0.5)
-        elif nose_radius > 3.0:
-            raise ValueError(
-                f"nose_radius {nose_radius} m exceeds Tauber-Sutton "
-                f"validity (R_N <= 3 m)"
+        in_rho_range = (
+            (result.density >= TAUBER_SUTTON_RHO_MIN)
+            & (result.density <= TAUBER_SUTTON_RHO_MAX)
+        )
+        in_range = in_v_range & in_rho_range
+
+        if in_range.any():
+            a_exp = (
+                1.072e6
+                * result.velocity[in_range] ** (-1.88)
+                * result.density[in_range] ** (-0.325)
+            )
+            if 1.0 <= nose_radius < 2.0:
+                a_exp = np.minimum(a_exp, 0.6)
+            elif 2.0 <= nose_radius <= 3.0:
+                a_exp = np.minimum(a_exp, 0.5)
+
+            f_v = np.interp(
+                result.velocity[in_range],
+                _TAUBER_SUTTON_V_TABLE,
+                _TAUBER_SUTTON_F_TABLE,
             )
 
-        f_v = np.interp(
-            result.velocity[in_range],
-            _TAUBER_SUTTON_V_TABLE,
-            _TAUBER_SUTTON_F_TABLE,
-        )
-
-        q_rad_in_range_wcm2 = (
-            _TAUBER_SUTTON_C
-            * (nose_radius ** a_exp)
-            * (result.density[in_range] ** _TAUBER_SUTTON_B)
-            * f_v
-        )
-        q_rad[in_range] = q_rad_in_range_wcm2 * _WCM2_TO_WM2
+            q_rad_in_range_wcm2 = (
+                _TAUBER_SUTTON_C
+                * (nose_radius ** a_exp)
+                * (result.density[in_range] ** _TAUBER_SUTTON_B)
+                * f_v
+            )
+            q_rad[in_range] = q_rad_in_range_wcm2 * _WCM2_TO_WM2
 
     q_total = q_conv + q_rad
 

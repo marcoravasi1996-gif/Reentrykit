@@ -66,5 +66,5 @@ EARTH = PlanetModel(
     max_atmosphere_altitude=_EARTH_MAX_ATMOSPHERE,
 )
 
+# Non-rotating Earth — useful for test regression and reproducing older results.
 EARTH_NON_ROTATING = EARTH._replace(rotation_rate=0.0)
-"""Non-rotating Earth, useful for test regression and reproducing older results."""
