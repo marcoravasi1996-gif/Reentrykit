@@ -9,11 +9,11 @@ estimates and for reusable insulator materials (e.g., Shuttle tiles).
 For ablative materials (PICA, AVCOAT), Level 1 sizing typically
 **overestimates** required thickness because:
 
-  1. Surface reradiation caps the temperature at radiative equilibrium
-     instead of the material's actual ablation temperature — so more
-     heat conducts inward than in a real pyrolyzing material.
-  2. Surface recession (material loss to ablation) is not modeled —
-     a real ablator reduces its own thickness while absorbing heat.
+1. Surface reradiation caps the temperature at radiative equilibrium
+    instead of the material's actual ablation temperature — so more
+    heat conducts inward than in a real pyrolyzing material.
+2. Surface recession (material loss to ablation) is not modeled —
+    a real ablator reduces its own thickness while absorbing heat.
 
 A ~20-30% margin between Level 1 predictions and actual flown ablator
 thicknesses is typical.
@@ -207,7 +207,6 @@ def transient_bondline_temperature(
     # Stable explicit time step constraints.
     # 1. Interior diffusion: Fourier number < 0.5
     dt_diffusion = 0.4 * dx**2 / alpha
-    
     # 2. Surface-node energy balance: limit dT per step to prevent runaway.
     # With q_max as the peak heat flux and rho*c*(dx/2) as surface node
     # thermal capacitance, we bound dT/step to a fraction of the material's
@@ -215,13 +214,11 @@ def transient_bondline_temperature(
     q_max = max(abs(heat_flux.max()), 1.0)  # avoid divide-by-zero
     surface_capacity = material.density * material.specific_heat * dx / 2.0
     dt_surface = 0.1 * material.max_surface_temperature * surface_capacity / q_max
-    
     # 3. Don't exceed input sampling
     input_dt = (
         heat_flux_time[1] - heat_flux_time[0]
         if len(heat_flux_time) > 1 else 0.1
     )
-    
     dt = min(dt_diffusion, dt_surface, input_dt / 2.0)
     n_steps = int(np.ceil((heat_flux_time[-1] - heat_flux_time[0]) / dt))
     dt = (heat_flux_time[-1] - heat_flux_time[0]) / n_steps
