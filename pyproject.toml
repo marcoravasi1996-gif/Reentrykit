@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "reentrykit"
-version = "0.0.1"
+version = "0.1.0"
 description = "Open-source preliminary design tools for hot structures: aerothermal analysis, TPS sizing, thermo-mechanical FEA, and panel flutter for hypersonic and reentry vehicles."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,7 +22,7 @@ keywords = [
     "panel-flutter",
 ]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
